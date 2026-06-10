@@ -83,6 +83,7 @@ int parquet_capi_to_csv_mem(
 
     int n_rg = reader->num_row_groups();
     auto opts = arrow::csv::WriteOptions::Defaults();
+    opts.quoting_style = arrow::csv::QuotingStyle::Needed;
 
     for (int rg = 0; rg < n_rg; rg++) {
         std::shared_ptr<arrow::Table> table;

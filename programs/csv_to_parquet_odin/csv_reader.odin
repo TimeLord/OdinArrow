@@ -1,10 +1,8 @@
 // Streaming RFC 4180 CSV reader.
-// Fields are appended into a caller-supplied arena [dynamic]u8.
-// Pre-reserve the arena to cap before reading a chunk to keep string
-// pointers stable (no reallocation = no pointer invalidation).
 package csv_to_parquet_odin
 
 import "core:os"
+import oa "../../src"
 
 CSV_Stream :: struct {
 	file:      ^os.File,
@@ -171,49 +169,46 @@ csv_consume_sep :: proc(cs: ^CSV_Stream) -> (eor: bool) {
 	return true // fallback
 }
 
-// csv_stream_read_chunk reads rows into col_data (pre-allocated [n_cols][max_rows]string).
-// Field bytes are appended into arena; returned strings point into arena.
-// The caller MUST pre-reserve arena to cap before calling to ensure no reallocation
-// (which would invalidate the returned string pointers).
-// Stops when max_rows is reached OR when arena is more than 90% full.
-// Returns number of rows actually written into col_data.
-csv_stream_read_chunk :: proc(
-	cs:         ^CSV_Stream,
-	col_data:   [][]string,
-	max_rows:   int,
-	arena:      ^[dynamic]u8,
-	per_row_est: int, // conservative bytes-per-row estimate for overflow guard
-) -> int {
-	n := 0
+// csv_stream_read_chunk reads up to max_rows rows and returns one OdinArrow
+// String_Type Array per column.  Returns nil arrays and n=0 at EOF.
+// The caller owns the returned slice and each Array; free with:
+//   for ci in 0..<csv.n_cols { oa.array_free(&arrays[ci]) }
+//   delete(arrays)
+csv_stream_read_chunk :: proc(cs: ^CSV_Stream, max_rows: int) -> (arrays: []oa.Array, n: int) {
+	if csv_stream_at_eof(cs) { return nil, 0 }
+
+	builders := make([]oa.String_Builder, cs.n_cols)
+	for ci in 0..<cs.n_cols {
+		builders[ci] = oa.string_builder_make(max_rows)
+	}
+
 	field_tmp := make([dynamic]u8, 0, 4096)
 	defer delete(field_tmp)
 
 	for n < max_rows && !csv_stream_at_eof(cs) {
-		// Stop if we'd fill the arena with the next row.
-		if len(arena^) + per_row_est > cap(arena^) { break }
-
 		ok := true
 		for ci in 0..<cs.n_cols {
 			clear(&field_tmp)
 			eor, eof := csv_read_field_into(cs, &field_tmp)
-
-			if eof && ci == 0 && len(field_tmp) == 0 {
-				ok = false
-				break
-			}
-
-			field_start := len(arena^)
-			// This append must not reallocate — we checked cap above.
-			// If a single field is unexpectedly huge, arena may reallocate
-			// and existing string pointers become invalid.  Callers should
-			// use a conservatively large capacity to avoid this.
-			append(arena, ..field_tmp[:])
-			col_data[ci][n] = string(arena^[field_start : len(arena^)])
-
+			if eof && ci == 0 && len(field_tmp) == 0 { ok = false; break }
+			oa.string_builder_append(&builders[ci], string(field_tmp[:]))
 			_ = eor
 		}
 		if !ok { break }
 		n += 1
 	}
-	return n
+
+	if n == 0 {
+		for ci in 0..<cs.n_cols { oa.string_builder_destroy(&builders[ci]) }
+		delete(builders)
+		return nil, 0
+	}
+
+	arrays = make([]oa.Array, cs.n_cols)
+	for ci in 0..<cs.n_cols {
+		arrays[ci], _ = oa.string_builder_finish(&builders[ci])
+		oa.string_builder_destroy(&builders[ci])
+	}
+	delete(builders)
+	return
 }

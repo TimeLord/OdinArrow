@@ -1,2 +1,4 @@
 examples/
 lib/
+bin/
+tmp_roundtrip/

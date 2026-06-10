@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:time"
+import oa "../../src"
 
 main :: proc() {
 	args := os.args[1:]
@@ -62,49 +63,31 @@ main :: proc() {
 	defer pw_destroy(&pw)
 
 	// ── Memory budget → chunk size ────────────────────────────────────────────
-	// arena holds string bytes for one row group.
-	// Budget breakdown:
-	//   buf_size   - CSV read buffer
-	//   arena_cap  - string bytes for one row group (we compute this)
-	//   32 MB      - runtime overhead, Parquet write buffers, etc.
-	overhead  := i64(buf_size) + 32 * 1024 * 1024
-	arena_cap := mem_limit - overhead
-	if arena_cap < 8 * 1024 * 1024 { arena_cap = 8 * 1024 * 1024 }
+	// Budget: buf_size (CSV read) + 32 MB overhead, rest for OdinArrow string
+	// builder data (offsets + bytes).  Conservative 200 bytes per field.
+	overhead    := i64(buf_size) + 32 * 1024 * 1024
+	col_buf_cap := mem_limit - overhead
+	if col_buf_cap < 8 * 1024 * 1024 { col_buf_cap = 8 * 1024 * 1024 }
 
-	// Estimate bytes per row (conservative: 200 bytes per column).
-	// This governs max_rows and the overflow guard in csv_stream_read_chunk.
 	per_row_est := n_cols * 200
 	if per_row_est < 1 { per_row_est = 200 }
 
-	max_rows := int(arena_cap) / per_row_est
+	max_rows := int(col_buf_cap) / per_row_est
 	if max_rows < 1 { max_rows = 1 }
 
-	// ── Allocate reusable structures ──────────────────────────────────────────
-	// col_data[ci][ri] → string view into arena; valid until arena is cleared.
-	col_data := make([][]string, n_cols)
-	defer {
-		for ci in 0..<n_cols { delete(col_data[ci]) }
-		delete(col_data)
-	}
-	for ci in 0..<n_cols { col_data[ci] = make([]string, max_rows) }
-
-	// Arena: pre-reserved to arena_cap bytes so append never reallocates
-	// (which would invalidate existing string pointers).
-	arena := make([dynamic]u8, 0, int(arena_cap))
-	defer delete(arena)
-
 	// ── Conversion loop ───────────────────────────────────────────────────────
-	t0          := time.now()
-	total_rows  := 0
+	t0           := time.now()
+	total_rows   := 0
 	total_chunks := 0
 
 	for {
-		clear(&arena) // reset len to 0; capacity stays at arena_cap → no realloc
-
-		n := csv_stream_read_chunk(&csv, col_data, max_rows, &arena, per_row_est)
+		arrays, n := csv_stream_read_chunk(&csv, max_rows)
 		if n == 0 { break }
 
-		pw_write_row_group(&pw, col_data[:n_cols], n)
+		pw_write_row_group(&pw, arrays)
+
+		for ci in 0..<n_cols { oa.array_free(&arrays[ci]) }
+		delete(arrays)
 
 		total_rows   += n
 		total_chunks += 1

@@ -3,6 +3,7 @@
 package csv_to_parquet_odin
 
 import "core:os"
+import oa "../../src"
 
 // Physical type constants
 PW_BYTE_ARRAY :: i32(6)
@@ -48,30 +49,30 @@ pw_open :: proc(file: ^os.File, col_names: []string) -> Parquet_Writer {
 	return pw
 }
 
-// pw_write_row_group writes one row group of n rows.
-// col_data[i][:n] holds the strings for column i.
-pw_write_row_group :: proc(pw: ^Parquet_Writer, col_data: [][]string, n: int) {
+// pw_write_row_group writes one row group from a slice of OdinArrow String_Type arrays.
+pw_write_row_group :: proc(pw: ^Parquet_Writer, cols: []oa.Array) {
 	rg: RG_Meta
 	rg.cols     = make([]Col_Write_Meta, pw.n_cols)
-	rg.num_rows = i64(n)
+	rg.num_rows = i64(cols[0].length)
 
 	for ci in 0..<pw.n_cols {
-		rg.cols[ci] = pw_write_column(pw, col_data[ci][:n])
+		rg.cols[ci] = pw_write_column(pw, &cols[ci])
 	}
 
 	append(&pw.row_groups, rg)
 }
 
-// pw_write_column writes one column's data page to the file and returns metadata.
-pw_write_column :: proc(pw: ^Parquet_Writer, vals: []string) -> Col_Write_Meta {
+// pw_write_column writes one OdinArrow String_Type Array as a PLAIN BYTE_ARRAY page.
+pw_write_column :: proc(pw: ^Parquet_Writer, arr: ^oa.Array) -> Col_Write_Meta {
 	meta: Col_Write_Meta
 	meta.data_page_off = pw.offset
-	meta.num_values    = i64(len(vals))
+	meta.num_values    = i64(arr.length)
 
 	// Build value bytes (PLAIN BYTE_ARRAY: [i32 len][bytes] per value)
 	val_buf: [dynamic]u8
 	defer delete(val_buf)
-	for s in vals {
+	for i in 0..<arr.length {
+		s := oa.array_get_string(arr, i)
 		n := len(s)
 		b4: [4]u8
 		b4[0] = u8(n);       b4[1] = u8(n >> 8)
@@ -81,7 +82,7 @@ pw_write_column :: proc(pw: ^Parquet_Writer, vals: []string) -> Col_Write_Meta {
 	}
 
 	comp_size := len(val_buf)
-	num_vals  := len(vals)
+	num_vals  := arr.length
 
 	// Build DataPageHeader using Thrift compact encoding
 	hdr_tw := tw_make()

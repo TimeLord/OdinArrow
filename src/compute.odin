@@ -210,9 +210,58 @@ _mask_passes :: #force_inline proc "contextless" (mask: ^Array, i: int) -> bool 
 }
 
 _filter_typed :: proc(arr, mask: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
-	b := builder_make(T, 0, allocator)
+	n         := arr.length
+	mask_bits := mask.buffers[1].data
+	arr_off   := arr.offset
+	mask_off  := mask.offset
+
+	// No-null fast path: skip the builder entirely — allocate exact output size and
+	// write values directly. Avoids per-element bitmap maintenance and dynamic-array overhead.
+	if arr.buffers[0].data == nil && mask.buffers[0].data == nil {
+		out_count := _filter_count_bits(mask_bits, mask_off, n)
+		data_buf  := buffer_make(out_count * size_of(T), allocator) or_return
+		src  := cast([^]T)arr.buffers[1].data
+		dst  := cast([^]T)data_buf.data
+		out_i := 0
+		if mask_off == 0 {
+			// Byte-at-a-time: read 8 mask bits at once to reduce branch mispredictions.
+			n_full := (n / 8) * 8
+			for i := 0; i < n_full; i += 8 {
+				byte := mask_bits[i >> 3]
+				if byte == 0 { continue }
+				for bit in u8(0)..<8 {
+					if (byte >> bit) & 1 == 1 {
+						dst[out_i] = src[arr_off + i + int(bit)]
+						out_i += 1
+					}
+				}
+			}
+			for i := n_full; i < n; i += 1 {
+				if bitmap_get(mask_bits, i) {
+					dst[out_i] = src[arr_off + i]
+					out_i += 1
+				}
+			}
+		} else {
+			for i in 0..<n {
+				if bitmap_get(mask_bits, mask_off + i) {
+					dst[out_i] = src[arr_off + i]
+					out_i += 1
+				}
+			}
+		}
+		result = Array{
+			type    = _data_type_for(T),
+			length  = out_count,
+			buffers = {{}, data_buf, {}},
+		}
+		return
+	}
+
+	// General path (source or mask has nulls): builder with upper-bound capacity.
+	b := builder_make(T, n, allocator)
 	defer builder_destroy(&b)
-	for i in 0..<arr.length {
+	for i in 0..<n {
 		if _mask_passes(mask, i) {
 			if array_is_null(arr, i) {
 				builder_append_null(&b)
@@ -222,6 +271,18 @@ _filter_typed :: proc(arr, mask: ^Array, $T: typeid, allocator: mem.Allocator) -
 		}
 	}
 	return builder_finish(&b, allocator)
+}
+
+// Count set bits in mask_bits in the range [off, off+n).
+_filter_count_bits :: proc "contextless" (mask_bits: [^]u8, off, n: int) -> int {
+	if off == 0 {
+		return bitmap_popcount(mask_bits, n)
+	}
+	count := 0
+	for i in 0..<n {
+		if bitmap_get(mask_bits, off + i) { count += 1 }
+	}
+	return count
 }
 
 _filter_bool :: proc(arr, mask: ^Array, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {

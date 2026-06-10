@@ -17,35 +17,48 @@ Primitive_Builder :: struct($T: typeid) {
 
 // Allocate a new builder with preallocated capacity.
 builder_make :: proc($T: typeid, initial_cap := 64, allocator := context.allocator) -> Primitive_Builder(T) {
+	bm_bytes := bitmap_byte_count(initial_cap)
 	return Primitive_Builder(T){
 		values = make([dynamic]T, 0, initial_cap, allocator),
-		bitmap = make([dynamic]u8, 0, (initial_cap + 7) / 8, allocator),
+		// Pre-sized to full capacity (all-zero = all null); valid bits are set lazily.
+		bitmap = make([dynamic]u8, bm_bytes, bm_bytes, allocator),
 	}
 }
 
 // Append a non-null value.
 builder_append :: proc(b: ^Primitive_Builder($T), val: T) {
-	i       := b.length
-	byte_i  := i >> 3
-	if byte_i >= len(b.bitmap) {
-		append(&b.bitmap, u8(0))
+	i := b.length
+	// Only maintain the bitmap once nulls have been seen; before that all bits
+	// are implicitly valid and the bitmap is left as-is (all-zero).
+	if b.null_count > 0 {
+		byte_i := i >> 3
+		if byte_i >= len(b.bitmap) {
+			resize(&b.bitmap, byte_i + 1)
+		}
+		b.bitmap[byte_i] |= 1 << u8(i & 7)
 	}
-	b.bitmap[byte_i] |= 1 << u8(i & 7) // mark valid
 	append(&b.values, val)
-	b.length += 1
+	b.length = i + 1
 }
 
 // Append a null value. The stored data value is the zero value of T (don't-care).
 builder_append_null :: proc(b: ^Primitive_Builder($T)) {
 	i      := b.length
 	byte_i := i >> 3
+	// Ensure bitmap covers the current byte before any writes.
 	if byte_i >= len(b.bitmap) {
-		append(&b.bitmap, u8(0)) // new byte starts 0 → bit stays null
+		resize(&b.bitmap, byte_i + 1)
 	}
+	if b.null_count == 0 {
+		// First null: retroactively mark all previous elements valid (set bits 0..i-1).
+		// bitmap was pre-sized to all-zero; bitmap_set_all writes the valid bits.
+		bitmap_set_all(raw_data(b.bitmap[:]), i)
+	}
+	// Null bit at position i stays 0 (bitmap is pre-initialized to zero).
 	zero: T
 	append(&b.values, zero)
 	b.null_count += 1
-	b.length += 1
+	b.length = i + 1
 }
 
 // Produce an immutable Array from the builder's accumulated values.

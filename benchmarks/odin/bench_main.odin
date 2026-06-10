@@ -51,35 +51,6 @@ bench_array_build :: proc() -> u64 {
 
 // ── sum ───────────────────────────────────────────────────────────────────────
 
-bench_sum_f64 :: proc() -> u64 {
-	// Setup
-	b := oa.builder_make(f64, N_LARGE)
-	for i in 0..<N_LARGE { oa.builder_append(&b, f64(i) * 0.001) }
-	arr, _ := oa.builder_finish(&b)
-	oa.builder_destroy(&b)
-
-	t0 := time.tick_now()
-	s, _ := oa.compute_sum(&arr)
-	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	_sink += s
-	oa.array_free(&arr)
-	return ns
-}
-
-bench_sum_i32 :: proc() -> u64 {
-	b := oa.builder_make(i32, N_LARGE)
-	for i in 0..<N_LARGE { oa.builder_append(&b, i32(i)) }
-	arr, _ := oa.builder_finish(&b)
-	oa.builder_destroy(&b)
-
-	t0 := time.tick_now()
-	s, _ := oa.compute_sum(&arr)
-	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	_sink += s
-	oa.array_free(&arr)
-	return ns
-}
-
 bench_sum_f64_mt :: proc() -> u64 {
 	b := oa.builder_make(f64, N_LARGE)
 	for i in 0..<N_LARGE { oa.builder_append(&b, f64(i) * 0.001) }
@@ -110,21 +81,6 @@ bench_sum_i32_mt :: proc() -> u64 {
 
 // ── min / max ─────────────────────────────────────────────────────────────────
 
-bench_min_max_i32 :: proc() -> u64 {
-	b := oa.builder_make(i32, N_LARGE)
-	for i in 0..<N_LARGE { oa.builder_append(&b, i32(N_LARGE - i)) }
-	arr, _ := oa.builder_finish(&b)
-	oa.builder_destroy(&b)
-
-	t0 := time.tick_now()
-	mn, _ := oa.compute_min(&arr)
-	mx, _ := oa.compute_max(&arr)
-	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	_sink += mn + mx
-	oa.array_free(&arr)
-	return ns
-}
-
 bench_min_max_i32_mt :: proc() -> u64 {
 	b := oa.builder_make(i32, N_LARGE)
 	for i in 0..<N_LARGE { oa.builder_append(&b, i32(N_LARGE - i)) }
@@ -141,26 +97,6 @@ bench_min_max_i32_mt :: proc() -> u64 {
 }
 
 // ── filter ────────────────────────────────────────────────────────────────────
-
-bench_filter_i32 :: proc() -> u64 {
-	b := oa.builder_make(i32, N_LARGE)
-	for i in 0..<N_LARGE { oa.builder_append(&b, i32(i)) }
-	arr, _ := oa.builder_finish(&b)
-	oa.builder_destroy(&b)
-
-	mb := oa.builder_make(bool, N_LARGE)
-	for i in 0..<N_LARGE { oa.builder_append(&mb, i % 2 == 0) }
-	mask, _ := oa.builder_finish(&mb)
-	oa.builder_destroy(&mb)
-
-	t0 := time.tick_now()
-	result, _ := oa.compute_filter(&arr, &mask)
-	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	oa.array_free(&result)
-	oa.array_free(&arr)
-	oa.array_free(&mask)
-	return ns
-}
 
 bench_filter_i32_mt :: proc() -> u64 {
 	b := oa.builder_make(i32, N_LARGE)
@@ -225,13 +161,9 @@ bench_string_scan :: proc() -> u64 {
 
 main :: proc() {
 	report("array_build_10m_i32", bench(bench_array_build))
-	report("sum_10m_f64",         bench(bench_sum_f64))
 	report("sum_10m_f64_mt",      bench(bench_sum_f64_mt))
-	report("sum_10m_i32",         bench(bench_sum_i32))
 	report("sum_10m_i32_mt",      bench(bench_sum_i32_mt))
-	report("min_max_10m_i32",     bench(bench_min_max_i32))
 	report("min_max_10m_i32_mt",  bench(bench_min_max_i32_mt))
-	report("filter_10m_i32",      bench(bench_filter_i32))
 	report("filter_10m_i32_mt",   bench(bench_filter_i32_mt))
 	report("string_build_1m",     bench(bench_string_build))
 	report("string_scan_1m",      bench(bench_string_scan))

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:time"
+import oa "../../src"
 
 // ── output buffer ─────────────────────────────────────────────────────────────
 
@@ -119,7 +120,14 @@ main :: proc() {
 		fmt.eprintln("error: bad parquet footer")
 		os.exit(1)
 	}
-	defer delete(metas)
+	defer {
+		for &m in metas {
+			delete(transmute([]u8)m.name)
+			delete(m.extra_rg_data_offsets)
+			delete(m.extra_rg_num_values)
+		}
+		delete(metas)
+	}
 
 	n_cols := len(metas)
 
@@ -164,28 +172,9 @@ main :: proc() {
 		streams[j] = s
 	}
 
-	// Allocate reusable chunk buffers
-	str_bufs := make([][]string, n_cols)
-	i32_bufs := make([][]i32,    n_cols)
-	defer {
-		for j in 0..<n_cols {
-			if str_bufs[j] != nil { delete(str_bufs[j]) }
-			if i32_bufs[j] != nil { delete(i32_bufs[j]) }
-		}
-		delete(str_bufs)
-		delete(i32_bufs)
-	}
-	for j in 0..<n_cols {
-		if metas[j].ptype == PTYPE_INT32 {
-			i32_bufs[j] = make([]i32, chunk_rows)
-		} else {
-			str_bufs[j] = make([]string, chunk_rows)
-		}
-	}
-
-	// Shared buffer for PLAIN BYTE_ARRAY string bytes; reset (not freed) each chunk
-	data_buf := make([dynamic]u8, 0, 32 << 20)
-	defer delete(data_buf)
+	// OdinArrow arrays for the current chunk; one per column, freed after each chunk.
+	chunk_arrays := make([]oa.Array, n_cols)
+	defer delete(chunk_arrays)
 
 	// Open output — declare the file handle at the same scope level as the Out
 	// buffer to avoid lifetime issues with ^os.File inside nested blocks.
@@ -219,27 +208,32 @@ main :: proc() {
 	for rows_done < total {
 		n := min(chunk_rows, total - rows_done)
 
-		clear(&data_buf)
 		for j in 0..<n_cols {
-			if i32_bufs[j] != nil {
-				col_stream_read_i32s(&streams[j], n, i32_bufs[j][:n])
+			if metas[j].ptype == PTYPE_INT32 {
+				chunk_arrays[j] = col_stream_to_i32_array(&streams[j], n)
 			} else {
-				col_stream_read_strings(&streams[j], n, str_bufs[j][:n], &data_buf)
+				chunk_arrays[j] = col_stream_to_string_array(&streams[j], n)
 			}
 		}
 
 		for r in 0..<n {
 			for j in 0..<n_cols {
 				if j > 0 { out_str(&o, ",") }
-				if i32_bufs[j] != nil {
-					out_i32(&o, i32_bufs[j][r])
+				if oa.array_is_null(&chunk_arrays[j], r) {
+					// write empty field for null values
 				} else {
-					out_csv_field(&o, str_bufs[j][r])
+					#partial switch _ in chunk_arrays[j].type {
+					case oa.Int32_Type:
+						out_i32(&o, oa.array_get(&chunk_arrays[j], r, i32))
+					case oa.String_Type:
+						out_csv_field(&o, oa.array_get_string(&chunk_arrays[j], r))
+					}
 				}
 			}
 			out_str(&o, "\n")
 		}
 
+		for j in 0..<n_cols { oa.array_free(&chunk_arrays[j]) }
 		rows_done += n
 	}
 	out_flush(&o)
