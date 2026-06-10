@@ -1,4 +1,4 @@
-# OpyArrow — Design & Development Plan
+# OdinArrow — Design & Development Plan
 
 ## What We Are Building
 
@@ -249,7 +249,7 @@ Benchmark scenarios:
 ## File Structure
 
 ```
-OpyArrow/
+OdinArrow/
 ├── PLAN.md                      ← this file
 ├── src/
 │   ├── buffer.odin
@@ -263,7 +263,7 @@ OpyArrow/
 │   ├── compute.odin
 │   ├── compute_simd.odin
 │   ├── ipc.odin
-│   └── opyarrow.odin            ← package entry, re-exports public API
+│   └── odinarrow.odin            ← package entry, re-exports public API
 ├── tests/
 │   ├── test_buffer.odin
 │   ├── test_bitmap.odin

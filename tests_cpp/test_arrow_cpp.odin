@@ -7,7 +7,7 @@
 // Build with: make test-cpp
 // (requires lib/libarrow_capi.so — built by make build-arrow-capi)
 
-package opyarrow_tests_cpp
+package odinarrow_tests_cpp
 
 import "core:testing"
 import oa "../src"

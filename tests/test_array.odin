@@ -1,4 +1,4 @@
-package opyarrow_tests
+package odinarrow_tests
 
 import "core:math"
 import "core:mem"

@@ -1,4 +1,4 @@
-package opyarrow
+package odinarrow
 
 import "core:mem"
 

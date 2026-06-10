@@ -1,4 +1,4 @@
-package opyarrow
+package odinarrow
 
 import "core:mem"
 
@@ -91,17 +91,35 @@ compute_max :: proc(arr: ^Array) -> (max_val: f64, valid_count: int) {
 	return
 }
 
+// Comparisons run in the native element type T (not f64): converting per
+// element blocks integer SIMD and costs ~7x on large arrays. The single
+// f64 conversion happens once, on the final result.
 _min_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, valid_count: int) {
 	data := cast([^]T)arr.buffers[1].data
 	off  := arr.offset
-	for i in 0..<arr.length {
-		if array_is_valid(arr, i) {
-			v := f64(data[off + i])
-			if valid_count == 0 || v < min_val {
-				min_val = v
-			}
-			valid_count += 1
+	n    := arr.length
+	if n == 0 do return
+	best: T
+	if arr.buffers[0].data == nil {
+		// No-null fast path: branch-free min reduction, auto-vectorises
+		best = data[off]
+		for i in 1..<n {
+			best = min(best, data[off + i])
 		}
+		valid_count = n
+	} else {
+		for i in 0..<n {
+			if array_is_valid(arr, i) {
+				v := data[off + i]
+				if valid_count == 0 || v < best {
+					best = v
+				}
+				valid_count += 1
+			}
+		}
+	}
+	if valid_count > 0 {
+		min_val = f64(best)
 	}
 	return
 }
@@ -109,14 +127,28 @@ _min_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, vali
 _max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (max_val: f64, valid_count: int) {
 	data := cast([^]T)arr.buffers[1].data
 	off  := arr.offset
-	for i in 0..<arr.length {
-		if array_is_valid(arr, i) {
-			v := f64(data[off + i])
-			if valid_count == 0 || v > max_val {
-				max_val = v
-			}
-			valid_count += 1
+	n    := arr.length
+	if n == 0 do return
+	best: T
+	if arr.buffers[0].data == nil {
+		best = data[off]
+		for i in 1..<n {
+			best = max(best, data[off + i])
 		}
+		valid_count = n
+	} else {
+		for i in 0..<n {
+			if array_is_valid(arr, i) {
+				v := data[off + i]
+				if valid_count == 0 || v > best {
+					best = v
+				}
+				valid_count += 1
+			}
+		}
+	}
+	if valid_count > 0 {
+		max_val = f64(best)
 	}
 	return
 }

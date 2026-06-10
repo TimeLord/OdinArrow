@@ -1,4 +1,4 @@
-package opyarrow
+package odinarrow
 
 // --- Type tags -----------------------------------------------------------
 // Empty structs — the tagged union discriminant IS the type identity.
