@@ -9,6 +9,11 @@ Record_Batch :: struct {
 	columns:   []Array,
 	length:    int,
 	allocator: mem.Allocator,
+	// Optional backing block this batch owns (e.g. the file bytes an IPC reader
+	// parsed zero-copy).  When set, the column buffers are views into it and
+	// record_batch_free releases it after the columns.  nil when each column
+	// owns its buffers individually.
+	_owned_backing: []u8,
 }
 
 // Shallow-copies the columns slice (Arrays share their underlying buffers).
@@ -38,11 +43,16 @@ record_batch_make :: proc(
 }
 
 // Free owned column arrays and the columns slice. Does NOT free the Schema.
+// View buffers (those that point into _owned_backing) are no-ops in
+// array_free; the shared backing block is released once, here.
 record_batch_free :: proc(rb: ^Record_Batch) {
 	for i in 0..<len(rb.columns) {
 		array_free(&rb.columns[i], rb.allocator)
 	}
 	delete(rb.columns, rb.allocator)
+	if rb._owned_backing != nil {
+		delete(rb._owned_backing, rb.allocator)
+	}
 	rb^ = {}
 }
 

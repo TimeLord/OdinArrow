@@ -623,7 +623,11 @@ _ipc_write_i32 :: proc(f: ^os.File, v: i32) { _ipc_write_u32(f, u32(v)) }
 ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
     data, read_err := os.read_entire_file(path, allocator)
     if read_err != nil { return }
-    defer delete(data, allocator)
+    // `data` is kept alive: columns are decoded zero-copy as views into it.
+    // Ownership transfers to the first batch below; on any early return or when
+    // there are no batches it is freed here.
+    keep_data := false
+    defer if !keep_data { delete(data, allocator) }
 
     n := len(data)
     if n < 14 { return }
@@ -701,8 +705,23 @@ ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: 
 
     _ = ft_nf
     batches = batch_list[:]
+    // Hand the backing block to the first batch (its columns are views into it);
+    // record_batch_free releases it once.  Other batches reference it but never
+    // free it, and view buffers are no-ops at free time, so free order is safe.
+    if len(batches) > 0 {
+        batches[0]._owned_backing = data
+        keep_data = true
+    }
     ok = true
     return
+}
+
+// Non-owning Buffer view into `body` (a sub-slice of the file block).  The
+// zero allocator marks it as not-owned, so buffer_free leaves it alone — the
+// memory is released once when the owning batch frees its backing block.
+_ipc_view_buffer :: proc(body: []u8, off, length: int) -> Buffer {
+    if length <= 0 || off < 0 || off+length > len(body) { return {} }
+    return Buffer{ data = cast([^]u8)&body[off], size = length, capacity = length }
 }
 
 _rd_i32 :: #force_inline proc "contextless" (data: []u8, pos: int) -> i32 {
@@ -965,7 +984,8 @@ _ipc_decode_record_batch :: proc(
             }
         }
 
-        // Build columns
+        // Build columns — buffers are zero-copy views into `body` (which lives
+        // in the file block the batch takes ownership of).
         columns := make([]Array, n_cols, allocator)
         buf_idx := 0
         for ci in 0..<min(n_cols, n_nodes) {
@@ -976,10 +996,7 @@ _ipc_decode_record_batch :: proc(
             // validity bitmap buffer
             var_buf: Buffer
             if buf_idx < n_bufs && buf_lengths[buf_idx] > 0 && null_count > 0 {
-                blen := int(buf_lengths[buf_idx])
-                boff := int(buf_offsets[buf_idx])
-                var_buf, _ = buffer_make(blen, allocator)
-                if boff+blen <= len(body) { mem.copy(rawptr(var_buf.data), rawptr(&body[boff]), blen) }
+                var_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
             }
             buf_idx += 1
 
@@ -988,22 +1005,16 @@ _ipc_decode_record_batch :: proc(
                 off_len := (col_len + 1) * size_of(i32)
                 off_buf: Buffer
                 if buf_idx < n_bufs {
-                    off_buf, _ = buffer_make(off_len, allocator)
-                    boff := int(buf_offsets[buf_idx])
-                    if boff+off_len <= len(body) { mem.copy(rawptr(off_buf.data), rawptr(&body[boff]), off_len) }
+                    off_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), off_len)
                 }
                 buf_idx += 1
                 data_buf: Buffer
                 if buf_idx < n_bufs {
-                    dlen := int(buf_lengths[buf_idx])
-                    data_buf, _ = buffer_make(dlen, allocator)
-                    boff := int(buf_offsets[buf_idx])
-                    if boff+dlen <= len(body) { mem.copy(rawptr(data_buf.data), rawptr(&body[boff]), dlen) }
+                    data_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
                 }
                 buf_idx += 1
                 columns[ci] = Array{type=dt, length=col_len, null_count=null_count, buffers={var_buf, off_buf, data_buf}}
             case Null_Type:
-                buffer_free(&var_buf)
                 columns[ci] = Array{type=dt, length=col_len}
             case Bool_Type,
                  Int8_Type, Int16_Type, Int32_Type, Int64_Type,
@@ -1012,10 +1023,7 @@ _ipc_decode_record_batch :: proc(
                 // fixed-width or bool
                 data_buf: Buffer
                 if buf_idx < n_bufs {
-                    dlen := int(buf_lengths[buf_idx])
-                    data_buf, _ = buffer_make(dlen, allocator)
-                    boff := int(buf_offsets[buf_idx])
-                    if boff+dlen <= len(body) { mem.copy(rawptr(data_buf.data), rawptr(&body[boff]), dlen) }
+                    data_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
                 }
                 buf_idx += 1
                 columns[ci] = Array{type=dt, length=col_len, null_count=null_count, buffers={var_buf, data_buf, {}}}
