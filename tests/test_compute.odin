@@ -327,3 +327,104 @@ test_compute_filter_large :: proc(t: ^testing.T) {
 	testing.expect_value(t, oa.array_get(&result, 0, i32), i32(0))
 	testing.expect_value(t, oa.array_get(&result, 1, i32), i32(2))
 }
+
+// ── min_max (single pass) ─────────────────────────────────────────────────────
+
+@(test)
+test_compute_min_max :: proc(t: ^testing.T) {
+	arr := build_array([]i32{5, 1, 9, 3, 7})
+	defer oa.array_free(&arr)
+	lo, hi, n := oa.compute_min_max(&arr)
+	testing.expect_value(t, lo, f64(1))
+	testing.expect_value(t, hi, f64(9))
+	testing.expect_value(t, n, 5)
+}
+
+@(test)
+test_compute_min_max_with_nulls :: proc(t: ^testing.T) {
+	b := oa.builder_make(i32)
+	defer oa.builder_destroy(&b)
+	oa.builder_append(&b, i32(10))
+	oa.builder_append_null(&b)
+	oa.builder_append(&b, i32(3))
+	oa.builder_append(&b, i32(8))
+	arr, _ := oa.builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	lo, hi, n := oa.compute_min_max(&arr)
+	testing.expect_value(t, lo, f64(3))
+	testing.expect_value(t, hi, f64(10))
+	testing.expect_value(t, n, 3)
+}
+
+// ── take ──────────────────────────────────────────────────────────────────────
+
+@(test)
+test_compute_take :: proc(t: ^testing.T) {
+	src := build_array([]i32{10, 20, 30, 40, 50})
+	defer oa.array_free(&src)
+
+	ib := oa.builder_make(i64)
+	defer oa.builder_destroy(&ib)
+	oa.builder_append(&ib, i64(4))
+	oa.builder_append(&ib, i64(1))
+	oa.builder_append(&ib, i64(3))
+	idx, _ := oa.builder_finish(&ib)
+	defer oa.array_free(&idx)
+
+	result, _ := oa.compute_take(&src, &idx)
+	defer oa.array_free(&result)
+	testing.expect_value(t, result.length, 3)
+	testing.expect_value(t, oa.array_get(&result, 0, i32), i32(50))
+	testing.expect_value(t, oa.array_get(&result, 1, i32), i32(20))
+	testing.expect_value(t, oa.array_get(&result, 2, i32), i32(40))
+}
+
+// ── cast ──────────────────────────────────────────────────────────────────────
+
+@(test)
+test_compute_cast_i32_to_f64 :: proc(t: ^testing.T) {
+	src := build_array([]i32{1, 2, 3})
+	defer oa.array_free(&src)
+
+	result, _ := oa.compute_cast(&src, oa.Float64_Type{})
+	defer oa.array_free(&result)
+	testing.expect_value(t, result.length, 3)
+	testing.expect(t, approx_eq(oa.array_get(&result, 0, f64), 1.0, 1e-10))
+	testing.expect(t, approx_eq(oa.array_get(&result, 2, f64), 3.0, 1e-10))
+}
+
+// ── arithmetic ────────────────────────────────────────────────────────────────
+
+@(test)
+test_compute_add :: proc(t: ^testing.T) {
+	a := build_array([]i32{1, 2, 3})
+	b := build_array([]i32{10, 20, 30})
+	defer oa.array_free(&a); defer oa.array_free(&b)
+
+	result, _ := oa.compute_add(&a, &b)
+	defer oa.array_free(&result)
+	testing.expect_value(t, oa.array_get(&result, 0, i32), i32(11))
+	testing.expect_value(t, oa.array_get(&result, 1, i32), i32(22))
+	testing.expect_value(t, oa.array_get(&result, 2, i32), i32(33))
+}
+
+@(test)
+test_compute_arithmetic_null_propagation :: proc(t: ^testing.T) {
+	ab := oa.builder_make(i32)
+	defer oa.builder_destroy(&ab)
+	oa.builder_append(&ab, i32(5))
+	oa.builder_append_null(&ab)
+	oa.builder_append(&ab, i32(7))
+	a, _ := oa.builder_finish(&ab)
+	defer oa.array_free(&a)
+
+	b := build_array([]i32{1, 2, 3})
+	defer oa.array_free(&b)
+
+	result, _ := oa.compute_add(&a, &b)
+	defer oa.array_free(&result)
+	testing.expect_value(t, oa.array_get(&result, 0, i32), i32(6))
+	testing.expect(t, oa.array_is_null(&result, 1))
+	testing.expect_value(t, oa.array_get(&result, 2, i32), i32(10))
+}

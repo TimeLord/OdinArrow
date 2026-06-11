@@ -5,108 +5,94 @@ import "core:mem"
 // Primitive_Builder accumulates values of type T and produces an owned Array
 // on finish(). T must be one of: bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64.
 //
-// bitmap tracks validity (null markers) for ALL types.
-// For Bool, values stores the actual true/false — packed to bits on finish.
-// For all other types, values is a contiguous typed buffer copied on finish.
+// Internal storage uses raw buffers ([^]T) rather than [dynamic]T to
+// eliminate the dynamic-array descriptor overhead on every append — direct
+// indexed writes replace per-call bounds-check + length-load + length-store.
 Primitive_Builder :: struct($T: typeid) {
-	values:     [dynamic]T,
-	bitmap:     [dynamic]u8, // validity, packed bits; only used when null_count > 0
+	data:       [^]T,   // raw value buffer
+	cap:        int,
+	bitmap:     [^]u8,  // validity bitmap (all-zero = all valid); sized lazily
+	bm_cap:     int,
 	null_count: int,
 	length:     int,
+	allocator:  mem.Allocator,
 }
 
 // Allocate a new builder with preallocated capacity.
 builder_make :: proc($T: typeid, initial_cap := 64, allocator := context.allocator) -> Primitive_Builder(T) {
-	bm_bytes := bitmap_byte_count(initial_cap)
+	cap := max(initial_cap, 1)
+	bm  := bitmap_byte_count(cap)
+	data_raw, _ := mem.alloc(cap * size_of(T), ARROW_ALIGNMENT, allocator)
+	bm_raw,   _ := mem.alloc(bm,               ARROW_ALIGNMENT, allocator)
+	mem.zero(bm_raw, bm)   // all-zero → valid bits written lazily
 	return Primitive_Builder(T){
-		values = make([dynamic]T, 0, initial_cap, allocator),
-		// Pre-sized to full capacity (all-zero = all null); valid bits are set lazily.
-		bitmap = make([dynamic]u8, bm_bytes, bm_bytes, allocator),
+		data      = cast([^]T)data_raw,
+		cap       = cap,
+		bitmap    = cast([^]u8)bm_raw,
+		bm_cap    = bm,
+		allocator = allocator,
 	}
 }
 
 // Append a non-null value.
 builder_append :: proc(b: ^Primitive_Builder($T), val: T) {
-	i := b.length
-	// Only maintain the bitmap once nulls have been seen; before that all bits
-	// are implicitly valid and the bitmap is left as-is (all-zero).
+	if b.length >= b.cap { _builder_grow_data(b) }
+	b.data[b.length] = val
 	if b.null_count > 0 {
-		byte_i := i >> 3
-		if byte_i >= len(b.bitmap) {
-			resize(&b.bitmap, byte_i + 1)
-		}
-		b.bitmap[byte_i] |= 1 << u8(i & 7)
+		byte_i := b.length >> 3
+		if byte_i >= b.bm_cap { _builder_grow_bitmap(b, byte_i + 1) }
+		b.bitmap[byte_i] |= 1 << u8(b.length & 7)
 	}
-	append(&b.values, val)
-	b.length = i + 1
+	b.length += 1
 }
 
-// Append a null value. The stored data value is the zero value of T (don't-care).
+// Append a null value.
 builder_append_null :: proc(b: ^Primitive_Builder($T)) {
-	i      := b.length
-	byte_i := i >> 3
-	// Ensure bitmap covers the current byte before any writes.
-	if byte_i >= len(b.bitmap) {
-		resize(&b.bitmap, byte_i + 1)
-	}
+	if b.length >= b.cap { _builder_grow_data(b) }
+	byte_i := b.length >> 3
+	if byte_i >= b.bm_cap { _builder_grow_bitmap(b, byte_i + 1) }
 	if b.null_count == 0 {
-		// First null: retroactively mark all previous elements valid (set bits 0..i-1).
-		// bitmap was pre-sized to all-zero; bitmap_set_all writes the valid bits.
-		bitmap_set_all(raw_data(b.bitmap[:]), i)
+		// First null: retroactively mark all previous elements valid.
+		bitmap_set_all(b.bitmap, b.length)
 	}
-	// Null bit at position i stays 0 (bitmap is pre-initialized to zero).
+	// Null bit stays 0 (bitmap zeroed on alloc/grow).
 	zero: T
-	append(&b.values, zero)
+	b.data[b.length] = zero
 	b.null_count += 1
-	b.length = i + 1
+	b.length += 1
 }
 
 // Produce an immutable Array from the builder's accumulated values.
-// The builder is NOT reset; call builder_reset or builder_destroy after finish.
-// Allocates two buffers (validity + data); caller owns the returned Array.
 builder_finish :: proc(
 	b:         ^Primitive_Builder($T),
 	allocator := context.allocator,
 ) -> (arr: Array, err: mem.Allocator_Error) {
-	// --- validity bitmap (only materialised when there are nulls) ---
+	// Validity bitmap — only materialised when there are nulls.
 	bitmap_buf: Buffer
 	if b.null_count > 0 {
-		n_bm_bytes := bitmap_byte_count(b.length)
-		bitmap_buf  = buffer_make(n_bm_bytes, allocator) or_return
-		src_n       := (b.length + 7) / 8
-		if src_n > 0 && len(b.bitmap) > 0 {
-			mem.copy(rawptr(bitmap_buf.data), rawptr(raw_data(b.bitmap[:])), src_n)
+		n_bm := bitmap_byte_count(b.length)
+		bitmap_buf = buffer_make(n_bm, allocator) or_return
+		src_n := (b.length + 7) / 8
+		if src_n > 0 && b.bm_cap > 0 {
+			mem.copy(rawptr(bitmap_buf.data), rawptr(b.bitmap), min(src_n, b.bm_cap))
 		}
 	}
 
-	// --- data buffer ---
+	// Data buffer.
 	data_buf: Buffer
 	when T == bool {
-		// Bool data is bit-packed (same layout as a bitmap)
 		n_data_bytes := bitmap_byte_count(b.length)
 		buf, buf_err := buffer_make(n_data_bytes, allocator)
-		if buf_err != nil {
-			buffer_free(&bitmap_buf)
-			err = buf_err
-			return
-		}
+		if buf_err != nil { buffer_free(&bitmap_buf); err = buf_err; return }
 		for i in 0..<b.length {
-			if b.values[i] {
-				buf.data[i >> 3] |= 1 << u8(i & 7)
-			}
+			if b.data[i] { buf.data[i >> 3] |= 1 << u8(i & 7) }
 		}
 		data_buf = buf
 	} else {
 		n_data_bytes := b.length * size_of(T)
 		buf, buf_err := buffer_make(n_data_bytes, allocator)
-		if buf_err != nil {
-			buffer_free(&bitmap_buf)
-			err = buf_err
-			return
-		}
-		if b.length > 0 {
-			mem.copy(rawptr(buf.data), rawptr(raw_data(b.values[:])), n_data_bytes)
-		}
+		if buf_err != nil { buffer_free(&bitmap_buf); err = buf_err; return }
+		if b.length > 0 { mem.copy(rawptr(buf.data), rawptr(b.data), n_data_bytes) }
 		data_buf = buf
 	}
 
@@ -120,22 +106,38 @@ builder_finish :: proc(
 	return
 }
 
-// Reset builder to empty without freeing underlying dynamic array memory (reuse).
 builder_reset :: proc(b: ^Primitive_Builder($T)) {
-	clear(&b.values)
-	clear(&b.bitmap)
+	mem.zero(rawptr(b.bitmap), b.bm_cap)
 	b.null_count = 0
 	b.length     = 0
 }
 
-// Free all memory held by the builder. The builder must not be used after this.
 builder_destroy :: proc(b: ^Primitive_Builder($T)) {
-	delete(b.values)
-	delete(b.bitmap)
+	if b.data   != nil { mem.free(rawptr(b.data),   b.allocator) }
+	if b.bitmap != nil { mem.free(rawptr(b.bitmap), b.allocator) }
 	b^ = {}
 }
 
-// --- internal helpers -----------------------------------------------------
+// ── growth helpers ────────────────────────────────────────────────────────────
+
+_builder_grow_data :: proc(b: ^Primitive_Builder($T)) {
+	new_cap := max(b.cap * 2, 16)
+	new_raw, _ := mem.resize(rawptr(b.data), b.cap * size_of(T), new_cap * size_of(T), ARROW_ALIGNMENT, b.allocator)
+	b.data = cast([^]T)new_raw
+	b.cap  = new_cap
+}
+
+_builder_grow_bitmap :: proc(b: ^Primitive_Builder($T), needed: int) {
+	new_cap := max(b.bm_cap * 2, needed, 8)
+	new_raw, _ := mem.resize(rawptr(b.bitmap), b.bm_cap, new_cap, ARROW_ALIGNMENT, b.allocator)
+	if new_cap > b.bm_cap {
+		mem.zero(rawptr((cast([^]u8)new_raw)[b.bm_cap:]), new_cap - b.bm_cap)
+	}
+	b.bitmap = cast([^]u8)new_raw
+	b.bm_cap = new_cap
+}
+
+// ── type helpers ──────────────────────────────────────────────────────────────
 
 _data_type_for :: proc($T: typeid) -> DataType {
 	when T == bool { return Bool_Type{} }

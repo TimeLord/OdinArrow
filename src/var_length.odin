@@ -18,22 +18,23 @@ String_Builder :: struct {
 }
 
 string_builder_make :: proc(initial_cap := 64, allocator := context.allocator) -> String_Builder {
+	bm_bytes := bitmap_byte_count(max(initial_cap, 1))
 	b := String_Builder{
 		offsets = make([dynamic]i32, 0, initial_cap + 1, allocator),
 		data    = make([dynamic]u8,  0, initial_cap * 8, allocator),
-		bitmap  = make([dynamic]u8,  0, (initial_cap + 7) / 8, allocator),
+		bitmap  = make([dynamic]u8,  bm_bytes, bm_bytes, allocator),
 	}
 	append(&b.offsets, i32(0))
 	return b
 }
 
 string_builder_append :: proc(b: ^String_Builder, s: string) {
-	i      := b.length
-	byte_i := i >> 3
-	if byte_i >= len(b.bitmap) {
-		append(&b.bitmap, u8(0))
+	i := b.length
+	if b.null_count > 0 {
+		byte_i := i >> 3
+		if byte_i >= len(b.bitmap) { resize(&b.bitmap, byte_i + 1) }
+		b.bitmap[byte_i] |= 1 << u8(i & 7)
 	}
-	b.bitmap[byte_i] |= 1 << u8(i & 7)
 	append(&b.data, ..transmute([]u8)s)
 	append(&b.offsets, i32(len(b.data)))
 	b.length += 1
@@ -42,10 +43,10 @@ string_builder_append :: proc(b: ^String_Builder, s: string) {
 string_builder_append_null :: proc(b: ^String_Builder) {
 	i      := b.length
 	byte_i := i >> 3
-	if byte_i >= len(b.bitmap) {
-		append(&b.bitmap, u8(0))
-	}
-	append(&b.offsets, b.offsets[len(b.offsets) - 1]) // same offset as previous
+	if byte_i >= len(b.bitmap) { resize(&b.bitmap, byte_i + 1) }
+	if b.null_count == 0 { bitmap_set_all(raw_data(b.bitmap[:]), i) }
+	// Null bit stays 0 (pre-zeroed).
+	append(&b.offsets, b.offsets[len(b.offsets) - 1])
 	b.null_count += 1
 	b.length += 1
 }

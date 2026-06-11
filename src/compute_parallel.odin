@@ -132,6 +132,53 @@ compute_mean_parallel :: proc(arr: ^Array, num_threads := 0) -> (mean: f64, vali
 	return
 }
 
+// ── min_max parallel ──────────────────────────────────────────────────────────
+
+_MM_Task :: struct {
+	slice: Array,
+	lo:    f64,
+	hi:    f64,
+	valid: int,
+}
+
+compute_min_max_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64, max_val: f64, valid_count: int) {
+	nt := _resolve_threads(num_threads, arr.length)
+	if arr.length < PARALLEL_MIN_LENGTH || nt <= 1 {
+		return compute_min_max(arr)
+	}
+
+	tasks   := make([]_MM_Task, nt)
+	threads := make([]^thread.Thread, nt)
+	defer delete(tasks)
+	defer delete(threads)
+
+	chunk := (arr.length + nt - 1) / nt
+	for i in 0..<nt {
+		from := i * chunk
+		to   := min(from + chunk, arr.length)
+		tasks[i].slice = array_slice(arr^, from, to)
+		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_MM_Task) {
+			t.lo, t.hi, t.valid = compute_min_max(&t.slice)
+		})
+	}
+	thread.join_multiple(..threads)
+
+	for i in 0..<nt {
+		thread.destroy(threads[i])
+		if tasks[i].valid > 0 {
+			if valid_count == 0 {
+				min_val = tasks[i].lo
+				max_val = tasks[i].hi
+			} else {
+				if tasks[i].lo < min_val { min_val = tasks[i].lo }
+				if tasks[i].hi > max_val { max_val = tasks[i].hi }
+			}
+			valid_count += tasks[i].valid
+		}
+	}
+	return
+}
+
 // ── filter ────────────────────────────────────────────────────────────────────
 
 _Filter_Task :: struct {

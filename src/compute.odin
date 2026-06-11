@@ -31,9 +31,12 @@ _sum_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (sum: f64, valid_co
 	off  := arr.offset
 	n    := arr.length
 	if arr.buffers[0].data == nil {
-		// No-null fast path: tight loop; LLVM auto-vectorises at -o:speed
-		for i in 0..<n {
-			sum += f64(data[off + i])
+		when T == f64 {
+			sum = off == 0 ? _sum_f64_simd(data, n) : _sum_f64_simd(data[off:], n)
+		} else when T == i32 {
+			sum = f64(off == 0 ? _sum_i32_simd(data, n) : _sum_i32_simd(data[off:], n))
+		} else {
+			for i in 0..<n { sum += f64(data[off + i]) }
 		}
 		valid_count = n
 	} else {
@@ -101,26 +104,23 @@ _min_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, vali
 	if n == 0 do return
 	best: T
 	if arr.buffers[0].data == nil {
-		// No-null fast path: branch-free min reduction, auto-vectorises
-		best = data[off]
-		for i in 1..<n {
-			best = min(best, data[off + i])
+		when T == i32 {
+			best = off == 0 ? _min_i32_simd(data, n) : _min_i32_simd(data[off:], n)
+		} else {
+			best = data[off]
+			for i in 1..<n { best = min(best, data[off + i]) }
 		}
 		valid_count = n
 	} else {
 		for i in 0..<n {
 			if array_is_valid(arr, i) {
 				v := data[off + i]
-				if valid_count == 0 || v < best {
-					best = v
-				}
+				if valid_count == 0 || v < best { best = v }
 				valid_count += 1
 			}
 		}
 	}
-	if valid_count > 0 {
-		min_val = f64(best)
-	}
+	if valid_count > 0 { min_val = f64(best) }
 	return
 }
 
@@ -131,25 +131,82 @@ _max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (max_val: f64, vali
 	if n == 0 do return
 	best: T
 	if arr.buffers[0].data == nil {
-		best = data[off]
-		for i in 1..<n {
-			best = max(best, data[off + i])
+		when T == i32 {
+			best = off == 0 ? _max_i32_simd(data, n) : _max_i32_simd(data[off:], n)
+		} else {
+			best = data[off]
+			for i in 1..<n { best = max(best, data[off + i]) }
 		}
 		valid_count = n
 	} else {
 		for i in 0..<n {
 			if array_is_valid(arr, i) {
 				v := data[off + i]
-				if valid_count == 0 || v > best {
-					best = v
-				}
+				if valid_count == 0 || v > best { best = v }
 				valid_count += 1
 			}
 		}
 	}
-	if valid_count > 0 {
-		max_val = f64(best)
+	if valid_count > 0 { max_val = f64(best) }
+	return
+}
+
+// ── min_max (single pass) ─────────────────────────────────────────────────────
+
+// Min and max in one pass — ~2× faster than calling compute_min + compute_max.
+compute_min_max :: proc(arr: ^Array) -> (min_val: f64, max_val: f64, valid_count: int) {
+	switch _ in arr.type {
+	case Int8_Type:    return _min_max_typed(arr, i8)
+	case Int16_Type:   return _min_max_typed(arr, i16)
+	case Int32_Type:   return _min_max_typed(arr, i32)
+	case Int64_Type:   return _min_max_typed(arr, i64)
+	case UInt8_Type:   return _min_max_typed(arr, u8)
+	case UInt16_Type:  return _min_max_typed(arr, u16)
+	case UInt32_Type:  return _min_max_typed(arr, u32)
+	case UInt64_Type:  return _min_max_typed(arr, u64)
+	case Float32_Type: return _min_max_typed(arr, f32)
+	case Float64_Type: return _min_max_typed(arr, f64)
+	case Null_Type, Bool_Type,
+	     String_Type, Large_String_Type,
+	     Binary_Type, Large_Binary_Type:
+		panic("compute_min_max: type does not support ordering")
 	}
+	return
+}
+
+_min_max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, max_val: f64, valid_count: int) {
+	data := cast([^]T)arr.buffers[1].data
+	off  := arr.offset
+	n    := arr.length
+	if n == 0 { return }
+	lo, hi: T
+	if arr.buffers[0].data == nil {
+		when T == i32 {
+			if off == 0 {
+				lo, hi = _min_max_i32_simd(data, n)
+			} else {
+				lo, hi = _min_max_i32_simd(data[off:], n)
+			}
+		} else {
+			lo = data[off]; hi = data[off]
+			for i in 1..<n {
+				v := data[off + i]
+				if v < lo { lo = v }
+				if v > hi { hi = v }
+			}
+		}
+		valid_count = n
+	} else {
+		for i in 0..<n {
+			if array_is_valid(arr, i) {
+				v := data[off + i]
+				if valid_count == 0 || v < lo { lo = v }
+				if valid_count == 0 || v > hi { hi = v }
+				valid_count += 1
+			}
+		}
+	}
+	if valid_count > 0 { min_val = f64(lo); max_val = f64(hi) }
 	return
 }
 
@@ -328,4 +385,199 @@ _filter_binary :: proc(arr, mask: ^Array, allocator: mem.Allocator) -> (result: 
 		}
 	}
 	return binary_builder_finish(&b, allocator)
+}
+
+// ── take ──────────────────────────────────────────────────────────────────────
+
+// Return a new array containing arr[indices[i]] for each i.
+// indices must be Int64_Type; out-of-range indices panic.
+compute_take :: proc(arr, indices: ^Array, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
+	_, ok := indices.type.(Int64_Type)
+	assert(ok, "compute_take: indices must be Int64_Type")
+	switch _ in arr.type {
+	case Int8_Type:    return _take_typed(arr, indices, i8,  allocator)
+	case Int16_Type:   return _take_typed(arr, indices, i16, allocator)
+	case Int32_Type:   return _take_typed(arr, indices, i32, allocator)
+	case Int64_Type:   return _take_typed(arr, indices, i64, allocator)
+	case UInt8_Type:   return _take_typed(arr, indices, u8,  allocator)
+	case UInt16_Type:  return _take_typed(arr, indices, u16, allocator)
+	case UInt32_Type:  return _take_typed(arr, indices, u32, allocator)
+	case UInt64_Type:  return _take_typed(arr, indices, u64, allocator)
+	case Float32_Type: return _take_typed(arr, indices, f32, allocator)
+	case Float64_Type: return _take_typed(arr, indices, f64, allocator)
+	case Bool_Type:    return _take_typed(arr, indices, bool, allocator)
+	case String_Type:  return _take_string(arr, indices, allocator)
+	case Binary_Type:  return _take_binary(arr, indices, allocator)
+	case Null_Type, Large_String_Type, Large_Binary_Type:
+		panic("compute_take: unsupported type")
+	}
+	return
+}
+
+_take_typed :: proc(arr, indices: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := indices.length
+	b := builder_make(T, n, allocator)
+	defer builder_destroy(&b)
+	for i in 0..<n {
+		idx := int(array_get(indices, i, i64))
+		if array_is_null(arr, idx) {
+			builder_append_null(&b)
+		} else {
+			builder_append(&b, array_get(arr, idx, T))
+		}
+	}
+	return builder_finish(&b, allocator)
+}
+
+_take_string :: proc(arr, indices: ^Array, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := indices.length
+	b := string_builder_make(n, allocator)
+	defer string_builder_destroy(&b)
+	for i in 0..<n {
+		idx := int(array_get(indices, i, i64))
+		if array_is_null(arr, idx) {
+			string_builder_append_null(&b)
+		} else {
+			string_builder_append(&b, array_get_string(arr, idx))
+		}
+	}
+	return string_builder_finish(&b, allocator)
+}
+
+_take_binary :: proc(arr, indices: ^Array, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := indices.length
+	b := binary_builder_make(n, allocator)
+	defer binary_builder_destroy(&b)
+	for i in 0..<n {
+		idx := int(array_get(indices, i, i64))
+		if array_is_null(arr, idx) {
+			binary_builder_append_null(&b)
+		} else {
+			binary_builder_append(&b, array_get_binary(arr, idx))
+		}
+	}
+	return binary_builder_finish(&b, allocator)
+}
+
+// ── cast ──────────────────────────────────────────────────────────────────────
+
+// Cast arr to a different numeric type.  Supports all numeric → numeric conversions.
+// String and Bool types are not supported.
+compute_cast :: proc(arr: ^Array, to: DataType, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
+	switch _ in to {
+	case Int8_Type:    return _cast_to_typed(arr, i8,  allocator)
+	case Int16_Type:   return _cast_to_typed(arr, i16, allocator)
+	case Int32_Type:   return _cast_to_typed(arr, i32, allocator)
+	case Int64_Type:   return _cast_to_typed(arr, i64, allocator)
+	case UInt8_Type:   return _cast_to_typed(arr, u8,  allocator)
+	case UInt16_Type:  return _cast_to_typed(arr, u16, allocator)
+	case UInt32_Type:  return _cast_to_typed(arr, u32, allocator)
+	case UInt64_Type:  return _cast_to_typed(arr, u64, allocator)
+	case Float32_Type: return _cast_to_typed(arr, f32, allocator)
+	case Float64_Type: return _cast_to_typed(arr, f64, allocator)
+	case Null_Type, Bool_Type,
+	     String_Type, Large_String_Type,
+	     Binary_Type, Large_Binary_Type:
+		panic("compute_cast: unsupported target type")
+	}
+	return
+}
+
+_cast_to_typed :: proc(arr: ^Array, $To: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := arr.length
+	b := builder_make(To, n, allocator)
+	defer builder_destroy(&b)
+	for i in 0..<n {
+		if array_is_null(arr, i) {
+			builder_append_null(&b)
+		} else {
+			builder_append(&b, To(_element_as_f64(arr, i)))
+		}
+	}
+	return builder_finish(&b, allocator)
+}
+
+_element_as_f64 :: #force_inline proc "contextless" (arr: ^Array, i: int) -> f64 {
+	idx := arr.offset + i
+	switch _ in arr.type {
+	case Int8_Type:    return f64((cast([^]i8) arr.buffers[1].data)[idx])
+	case Int16_Type:   return f64((cast([^]i16)arr.buffers[1].data)[idx])
+	case Int32_Type:   return f64((cast([^]i32)arr.buffers[1].data)[idx])
+	case Int64_Type:   return f64((cast([^]i64)arr.buffers[1].data)[idx])
+	case UInt8_Type:   return f64(arr.buffers[1].data[idx])
+	case UInt16_Type:  return f64((cast([^]u16)arr.buffers[1].data)[idx])
+	case UInt32_Type:  return f64((cast([^]u32)arr.buffers[1].data)[idx])
+	case UInt64_Type:  return f64((cast([^]u64)arr.buffers[1].data)[idx])
+	case Float32_Type: return f64((cast([^]f32)arr.buffers[1].data)[idx])
+	case Float64_Type: return (cast([^]f64)arr.buffers[1].data)[idx]
+	case Null_Type, Bool_Type,
+	     String_Type, Large_String_Type,
+	     Binary_Type, Large_Binary_Type:
+	}
+	return 0
+}
+
+// ── arithmetic (element-wise) ─────────────────────────────────────────────────
+
+Arithmetic_Op :: enum { Add, Sub, Mul, Div }
+
+// Element-wise arithmetic on two numeric arrays of the same type.
+// Result type matches the input type.  Null propagates: if either element is
+// null the output element is null.
+compute_arithmetic :: proc(left, right: ^Array, op: Arithmetic_Op, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
+	assert(left.length == right.length, "compute_arithmetic: length mismatch")
+	switch _ in left.type {
+	case Int8_Type:    return _arith_typed(left, right, i8,  op, allocator)
+	case Int16_Type:   return _arith_typed(left, right, i16, op, allocator)
+	case Int32_Type:   return _arith_typed(left, right, i32, op, allocator)
+	case Int64_Type:   return _arith_typed(left, right, i64, op, allocator)
+	case UInt8_Type:   return _arith_typed(left, right, u8,  op, allocator)
+	case UInt16_Type:  return _arith_typed(left, right, u16, op, allocator)
+	case UInt32_Type:  return _arith_typed(left, right, u32, op, allocator)
+	case UInt64_Type:  return _arith_typed(left, right, u64, op, allocator)
+	case Float32_Type: return _arith_typed(left, right, f32, op, allocator)
+	case Float64_Type: return _arith_typed(left, right, f64, op, allocator)
+	case Null_Type, Bool_Type,
+	     String_Type, Large_String_Type,
+	     Binary_Type, Large_Binary_Type:
+		panic("compute_arithmetic: unsupported type")
+	}
+	return
+}
+
+_arith_typed :: proc(left, right: ^Array, $T: typeid, op: Arithmetic_Op, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := left.length
+	b := builder_make(T, n, allocator)
+	defer builder_destroy(&b)
+	for i in 0..<n {
+		if array_is_null(left, i) || array_is_null(right, i) {
+			builder_append_null(&b)
+			continue
+		}
+		l := array_get(left, i, T)
+		r := array_get(right, i, T)
+		v: T
+		switch op {
+		case .Add: v = l + r
+		case .Sub: v = l - r
+		case .Mul: v = l * r
+		case .Div: v = l / r
+		}
+		builder_append(&b, v)
+	}
+	return builder_finish(&b, allocator)
+}
+
+// Convenience wrappers.
+compute_add :: proc(left, right: ^Array, allocator := context.allocator) -> (Array, mem.Allocator_Error) {
+	return compute_arithmetic(left, right, .Add, allocator)
+}
+compute_sub :: proc(left, right: ^Array, allocator := context.allocator) -> (Array, mem.Allocator_Error) {
+	return compute_arithmetic(left, right, .Sub, allocator)
+}
+compute_mul :: proc(left, right: ^Array, allocator := context.allocator) -> (Array, mem.Allocator_Error) {
+	return compute_arithmetic(left, right, .Mul, allocator)
+}
+compute_div :: proc(left, right: ^Array, allocator := context.allocator) -> (Array, mem.Allocator_Error) {
+	return compute_arithmetic(left, right, .Div, allocator)
 }

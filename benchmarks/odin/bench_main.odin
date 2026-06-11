@@ -88,8 +88,7 @@ bench_min_max_i32_mt :: proc() -> u64 {
 	oa.builder_destroy(&b)
 
 	t0 := time.tick_now()
-	mn, _ := oa.compute_min_parallel(&arr)
-	mx, _ := oa.compute_max_parallel(&arr)
+	mn, mx, _ := oa.compute_min_max_parallel(&arr)
 	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
 	_sink += mn + mx
 	oa.array_free(&arr)
