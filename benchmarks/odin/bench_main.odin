@@ -156,6 +156,37 @@ bench_string_scan :: proc() -> u64 {
 	return ns
 }
 
+// ── IPC roundtrip ─────────────────────────────────────────────────────────────
+
+IPC_BENCH_PATH :: "/tmp/oa_bench_ipc.arrow"
+
+bench_ipc_roundtrip :: proc() -> u64 {
+	b := oa.builder_make(i32, N_LARGE)
+	for i in 0..<N_LARGE { oa.builder_append(&b, i32(i)) }
+	arr, _ := oa.builder_finish(&b)
+	oa.builder_destroy(&b)
+
+	fields := []oa.Field{oa.field_make("v", oa.Int32_Type{})}
+	schema, _ := oa.schema_make(fields)
+	batch, _ := oa.record_batch_make(&schema, []oa.Array{arr})  // batch owns arr
+
+	t0 := time.tick_now()
+	oa.ipc_write_file(IPC_BENCH_PATH, &schema, []oa.Record_Batch{batch})
+	schema2, batches, _ := oa.ipc_read_file(IPC_BENCH_PATH)
+	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
+
+	if len(batches) > 0 {
+		col := oa.record_batch_column_at(&batches[0], 0)
+		_sink += f64(oa.array_get(col, 0, i32))
+	}
+	oa.schema_free(schema2); free(schema2)
+	for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+	delete(batches)
+	oa.record_batch_free(&batch)
+	oa.schema_free(&schema)
+	return ns
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 main :: proc() {
@@ -166,4 +197,5 @@ main :: proc() {
 	report("filter_10m_i32_mt",   bench(bench_filter_i32_mt))
 	report("string_build_1m",     bench(bench_string_build))
 	report("string_scan_1m",      bench(bench_string_scan))
+	report("ipc_roundtrip_10m_i32", bench(bench_ipc_roundtrip))
 }

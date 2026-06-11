@@ -51,6 +51,7 @@ ODIN_KEYS=(
     filter_10m_i32_mt
     string_build_1m
     string_scan_1m
+    ipc_roundtrip_10m_i32
 )
 
 CPPPY_KEYS=(
@@ -61,6 +62,7 @@ CPPPY_KEYS=(
     filter_10m_i32
     string_build_1m
     string_scan_1m
+    ipc_roundtrip_10m_i32
 )
 
 LABELS=(
@@ -71,17 +73,15 @@ LABELS=(
     "Filter 10M i32 (threaded)"
     "Build 1M strings (2% nulls)"
     "Scan 1M strings"
+    "IPC roundtrip 10M i32 (w+r)"
 )
 
-ns_to_ms() { echo "scale=2; $1 / 1000000" | bc; }
+ns_to_ms() { awk -v n="$1" 'BEGIN { printf "%.2f", n / 1000000 }'; }
 
 ratio() {
     local ref="$1" cmp="$2"
     if [[ "$cmp" -eq 0 || "$ref" -eq 0 ]]; then echo "N/A"; return; fi
-    local r
-    r=$(echo "scale=2; $ref / $cmp" | bc)
-    [[ "$r" == .* ]] && r="0${r}"
-    echo "${r}x"
+    awk -v r="$ref" -v c="$cmp" 'BEGIN { printf "%.2fx", r / c }'
 }
 
 echo ""

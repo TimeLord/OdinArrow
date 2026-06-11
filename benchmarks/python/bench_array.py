@@ -2,10 +2,12 @@
 import statistics, time
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.ipc as ipc
 
 N_LARGE  = 10_000_000
 N_STRING = 1_000_000
 TRIALS   = 5
+IPC_BENCH_PATH = "/tmp/py_bench_ipc.arrow"
 
 def median_ns(times_ns):
     return statistics.median(times_ns)
@@ -51,7 +53,26 @@ def bench_string_scan():
     _ = total
     return median_ns(times)
 
+# ── IPC roundtrip ─────────────────────────────────────────────────────────────
+
+def bench_ipc_roundtrip():
+    schema = pa.schema([pa.field("v", pa.int32())])
+    batch = pa.record_batch([pa.array(range(N_LARGE), type=pa.int32())], schema=schema)
+    times = []
+    for _ in range(TRIALS):
+        t0 = time.perf_counter_ns()
+        with pa.OSFile(IPC_BENCH_PATH, "wb") as f:
+            w = ipc.new_file(f, schema)
+            w.write_batch(batch)
+            w.close()
+        rd = ipc.open_file(IPC_BENCH_PATH)
+        out = rd.get_batch(0)
+        times.append(time.perf_counter_ns() - t0)
+        _ = out.column("v")[0].as_py()
+    return median_ns(times)
+
 if __name__ == "__main__":
-    report("array_build_10m_i32", bench_array_build())
-    report("string_build_1m",     bench_string_build())
-    report("string_scan_1m",      bench_string_scan())
+    report("array_build_10m_i32",   bench_array_build())
+    report("string_build_1m",       bench_string_build())
+    report("string_scan_1m",        bench_string_scan())
+    report("ipc_roundtrip_10m_i32", bench_ipc_roundtrip())

@@ -4,6 +4,8 @@
  */
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
+#include <arrow/io/file.h>
+#include <arrow/ipc/api.h>
 
 #include <algorithm>
 #include <chrono>
@@ -162,6 +164,35 @@ static ns_t bench_string_scan() {
     return now_ns() - t0;
 }
 
+// ── IPC roundtrip ─────────────────────────────────────────────────────────────
+
+static const char* IPC_BENCH_PATH = "/tmp/cpp_bench_ipc.arrow";
+
+static ns_t bench_ipc_roundtrip() {
+    arrow::Int32Builder b;
+    for (int i = 0; i < N_LARGE; ++i) (void)b.Append(i);
+    std::shared_ptr<arrow::Array> arr;
+    (void)b.Finish(&arr);
+    auto schema = arrow::schema({arrow::field("v", arrow::int32())});
+    auto batch  = arrow::RecordBatch::Make(schema, arr->length(), {arr});
+
+    auto t0 = now_ns();
+    {
+        auto out = arrow::io::FileOutputStream::Open(IPC_BENCH_PATH).ValueOrDie();
+        auto w   = arrow::ipc::MakeFileWriter(out, schema).ValueOrDie();
+        (void)w->WriteRecordBatch(*batch);
+        (void)w->Close();
+        (void)out->Close();
+    }
+    auto in  = arrow::io::ReadableFile::Open(IPC_BENCH_PATH).ValueOrDie();
+    auto rd  = arrow::ipc::RecordBatchFileReader::Open(in).ValueOrDie();
+    auto got = rd->ReadRecordBatch(0).ValueOrDie();
+    auto ns  = now_ns() - t0;
+    g_sink += static_cast<double>(got->num_rows());
+    (void)in->Close();
+    return ns;
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 template<typename F>
@@ -186,6 +217,7 @@ int main() {
     report("filter_10m_i32",      run(bench_filter_i32));
     report("string_build_1m",     run(bench_string_build));
     report("string_scan_1m",      run(bench_string_scan));
+    report("ipc_roundtrip_10m_i32", run(bench_ipc_roundtrip));
 
     // Emit sink so the compiler can't prove it's dead
     if (g_sink < -1e300) std::printf("sink=%f\n", g_sink);
