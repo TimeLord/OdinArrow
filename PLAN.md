@@ -206,27 +206,30 @@ Files: `schema.odin`, `record_batch.odin`, `table.odin`
 Files: `compute.odin`, `compute_simd.odin`
 
 Priority order (by PyArrow benchmark value):
-- [ ] `sum`, `min`, `max`, `mean` for all numeric types
-- [ ] `count` (total + non-null)
-- [ ] `filter` (boolean mask → new array)
-- [ ] `take` (index array → new array)
-- [ ] `cast` (safe numeric casts)
+- [x] `sum`, `min`, `max`, `mean` for all numeric types
+- [x] `count` (total + non-null)
+- [x] `filter` (boolean mask → new array)
+- [x] `take` (index array → new array)
+- [x] `cast` (safe numeric casts)
 - [ ] `sort_indices`
-- [ ] Arithmetic: `add`, `subtract`, `multiply`, `divide` (element-wise)
+- [x] Arithmetic: `add`, `subtract`, `multiply`, `divide` (element-wise)
 
-SIMD targets: sum_i32, sum_f64, filter_i32 (these are PyArrow hot paths)
+SIMD targets: sum_i32, sum_f64, filter_i32 (these are PyArrow hot paths) — done,
+plus min/max. Threaded variants (compute_*_parallel) fan out across all cores.
 
 **Tests**: correctness vs hand-computed values, null propagation rules
 
 ### Phase 6 — IPC Format
-Files: `ipc.odin`, `flatbuffers_lite.odin`
+Files: `ipc.odin` (self-contained back-to-front FlatBuffers builder)
 
 - [ ] Arrow IPC stream writer/reader (FlatBuffers schema)
-- [ ] Arrow IPC file writer/reader (seekable, random batch access)
-- [ ] This enables writing Odin arrays → file → reading in Python for
-      cross-validation and large benchmark datasets
+- [x] Arrow IPC file writer/reader (Feather v2, seekable, random batch access)
+- [x] Cross-validated with PyArrow in both directions (int8/16/32/64,
+      uint, float32/64, utf8, nulls, multiple record batches)
+- [x] Zero-copy reads: columns are views into the file block (no per-buffer copy)
 
-**Tests**: roundtrip write → read for all array types
+**Tests**: roundtrip write → read for all array types (tests/test_ipc.odin),
+plus a PyArrow interop harness.
 
 ### Phase 7 — Benchmarking Harness
 Files: `benchmarks/bench_*.odin`, `benchmarks/bench_*.py`, `benchmarks/compare.sh`
@@ -242,7 +245,7 @@ Benchmark scenarios:
 4. **Filter**: boolean mask on 10M int32 (50% pass rate)
 5. **String construction**: build 1M short strings
 6. **String scan**: compute byte length of each string in 1M column
-7. **IPC roundtrip**: write + read 10M int32 column to disk
+7. **IPC roundtrip**: write + read 10M int32 column to disk ✅ (all three runners)
 
 ---
 
