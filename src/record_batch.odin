@@ -14,6 +14,9 @@ Record_Batch :: struct {
 	// record_batch_free releases it after the columns.  nil when each column
 	// owns its buffers individually.
 	_owned_backing: []u8,
+	// Custom releaser for _owned_backing (e.g. munmap for a memory-mapped file).
+	// nil → the block is heap memory, freed with `delete(_, allocator)`.
+	_backing_free: proc(_: []u8),
 }
 
 // Shallow-copies the columns slice (Arrays share their underlying buffers).
@@ -51,7 +54,11 @@ record_batch_free :: proc(rb: ^Record_Batch) {
 	}
 	delete(rb.columns, rb.allocator)
 	if rb._owned_backing != nil {
-		delete(rb._owned_backing, rb.allocator)
+		if rb._backing_free != nil {
+			rb._backing_free(rb._owned_backing)   // e.g. munmap
+		} else {
+			delete(rb._owned_backing, rb.allocator)
+		}
 	}
 	rb^ = {}
 }

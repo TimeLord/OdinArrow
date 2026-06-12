@@ -623,13 +623,25 @@ _ipc_write_i32 :: proc(f: ^os.File, v: i32) { _ipc_write_u32(f, u32(v)) }
 // Read all record batches from an Arrow IPC file.
 // The caller owns returned batches (call record_batch_free on each).
 ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
-    data, read_err := os.read_entire_file(path, allocator)
-    if read_err != nil { return }
-    // `data` is kept alive: columns are decoded zero-copy as views into it.
+    // Memory-map the file so pages fault in lazily; columns are decoded
+    // zero-copy as views into the mapping.  Fall back to a plain read where
+    // mmap is unavailable.  `release` is the matching deleter (munmap or, for
+    // the fallback, nil → heap delete).
+    data, unmap, mapped := _ipc_map_file(path)
+    release: proc(_: []u8) = unmap
+    if !mapped {
+        d, read_err := os.read_entire_file(path, allocator)
+        if read_err != nil { return }
+        data    = d
+        release = nil
+    }
     // Ownership transfers to the first batch below; on any early return or when
-    // there are no batches it is freed here.
+    // there are no batches the backing is freed here.
     keep_data := false
-    defer if !keep_data { delete(data, allocator) }
+    defer if !keep_data {
+        if release != nil { release(data) }
+        else              { delete(data, allocator) }
+    }
 
     n := len(data)
     if n < 14 { return }
@@ -712,6 +724,7 @@ ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: 
     // free it, and view buffers are no-ops at free time, so free order is safe.
     if len(batches) > 0 {
         batches[0]._owned_backing = data
+        batches[0]._backing_free  = release   // munmap, or nil → heap delete
         keep_data = true
     }
     ok = true
@@ -755,10 +768,19 @@ ipc_write_stream :: proc(path: string, schema: ^Schema, batches: []Record_Batch)
 // Read an Arrow IPC stream.  The caller owns the returned schema and batches
 // exactly as with ipc_read_file (free batches, then schema_free + free(schema)).
 ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
-    data, read_err := os.read_entire_file(path, allocator)
-    if read_err != nil { return }
+    data, unmap, mapped := _ipc_map_file(path)
+    release: proc(_: []u8) = unmap
+    if !mapped {
+        d, read_err := os.read_entire_file(path, allocator)
+        if read_err != nil { return }
+        data    = d
+        release = nil
+    }
     keep_data := false
-    defer if !keep_data { delete(data, allocator) }
+    defer if !keep_data {
+        if release != nil { release(data) }
+        else              { delete(data, allocator) }
+    }
 
     n := len(data)
     schema = new(Schema, allocator)
@@ -811,6 +833,7 @@ ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema
     batches = batch_list[:]
     if len(batches) > 0 {
         batches[0]._owned_backing = data
+        batches[0]._backing_free  = release   // munmap, or nil → heap delete
         keep_data = true
     }
     ok = true

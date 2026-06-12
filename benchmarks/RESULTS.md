@@ -29,16 +29,17 @@ apples-to-apples.
 
 | Benchmark | Threading | OdinArrow (ms) | PyArrow (ms) | Arrow C++ (ms) | Py/Odin | C++/Odin |
 |---|---|---:|---:|---:|---:|---:|
-| Build 10M i32 (1% nulls) | all single | 83.15 | 1005.55 | 40.06 | 12.09× | 0.48× |
-| Sum 10M f64 | Odin MT | 3.05 | 5.84 | 6.55 | 1.92× | 2.15× |
-| Sum 10M i32 | Odin MT | 1.79 | 2.91 | 2.52 | 1.62× | 1.40× |
-| Min+Max 10M i32 | Odin MT | 1.87 | 4.33 | 2.58 | 2.32× | 1.38× |
-| Filter 10M i32 (50% pass) | Odin MT | 10.08 | 39.39 | 37.55 | 3.91× | 3.73× |
-| Build 1M strings (2% nulls) | all single | 21.48 | 95.92 | 8.01 | 4.47× | 0.37× |
-| Scan 1M strings | all single | 0.78 | 9.21 | 9.15 | 11.74× | 11.67× |
-| IPC roundtrip 10M i32 (w+r) | all single | 20.78 | 10.66 | 10.85 | 0.51× | 0.52× |
+| Build 10M i32 (1% nulls) | all single | 94.83 | 990.78 | 38.34 | 10.45× | 0.40× |
+| Sum 10M f64 | Odin MT | 3.31 | 6.00 | 6.70 | 1.81× | 2.02× |
+| Sum 10M i32 | Odin MT | 1.83 | 2.46 | 2.50 | 1.34× | 1.37× |
+| Min+Max 10M i32 | Odin MT | 1.86 | 4.77 | 2.73 | 2.57× | 1.47× |
+| Filter 10M i32 (50% pass) | Odin MT | 11.15 | 39.60 | 37.48 | 3.55× | 3.36× |
+| Build 1M strings (2% nulls) | all single | 21.37 | 96.60 | 6.68 | 4.52× | 0.31× |
+| Scan 1M strings | all single | 1.28 | 9.12 | 9.00 | 7.09× | 7.00× |
+| IPC roundtrip 10M i32 (w+r) | all single | 5.49 | 11.77 | 11.72 | 2.14× | 2.14× |
 
 Ratios > 1× mean OdinArrow is faster; < 1× mean it is slower.
+(IPC read is now memory-mapped — see that row's analysis below.)
 
 ## Per-benchmark analysis
 
@@ -81,27 +82,32 @@ Arrow C++ both pay **compute-kernel dispatch overhead** (`utf8_length` →
 This is partly an artifact of comparing a hand loop against a generic kernel
 pipeline — but it does show OdinArrow's zero-dispatch model paying off.
 
-### IPC roundtrip — write+read 10M i32 (Odin 0.51× both)
-**The one area OdinArrow trails both.** Write is competitive (~5 ms); the gap is
-on **read**. OdinArrow reads the whole 40 MB file eagerly (`os.read_entire_file`)
-and then exposes columns as zero-copy views into it. PyArrow and Arrow C++
-**memory-map** the file, so the 40 MB never actually streams through a read
-syscall — pages fault in lazily and this benchmark only touches one element.
-Closing this needs an mmap-backed reader (see "future work").
+### IPC roundtrip — write+read 10M i32 (Odin 2.1× both)
+Now a **win over both**. The reader is **memory-mapped** (`mmap`, `PROT_READ`,
+`MAP_PRIVATE`): columns are zero-copy views into the mapping, so the 40 MB never
+streams through a read syscall — pages fault in lazily. The "read" half drops to
+~0.04 ms (was ~14 ms with an eager read, ~39 ms before zero-copy), leaving the
+~5 ms write as the whole cost. PyArrow and Arrow C++ also mmap on read, so their
+~11.7 ms is dominated by *their* write path, which does more bookkeeping than
+OdinArrow's. The mapping is released with `munmap` when the owning batch is freed
+(`Record_Batch._backing_free`); on platforms without the unix mmap path the
+reader transparently falls back to a full read.
 
 ## Takeaways
 
-- **vs PyArrow:** OdinArrow is faster on every benchmark except IPC roundtrip,
-  by 1.6×–12×. Much of the large wins (build, string build) is Python interpreter
-  overhead rather than Arrow itself, but the systems-language model removes that
-  overhead by construction.
+- **vs PyArrow:** OdinArrow is faster on **every** benchmark, by 1.3×–10×. Much
+  of the large wins (build, string build) is Python interpreter overhead rather
+  than Arrow itself, but the systems-language model removes that overhead by
+  construction.
 - **vs Arrow C++ (the real bar):**
-  - **Wins** on the threaded reductions/filter (1.4×–3.7×) — largely from using
+  - **Wins** on the threaded reductions/filter (1.4×–3.6×) — largely from using
     all cores; per-core it is competitive, not dominant.
-  - **Wins big** on string scan (~12×), mostly because the C++ side goes through
+  - **Wins big** on string scan (~7×), mostly because the C++ side goes through
     a generic compute kernel for a trivial operation.
-  - **Trails** on single-threaded *construction* (array build ~2×, string build
-    ~2.7×) and on **IPC read** (~2×, eager read vs mmap).
+  - **Wins** the IPC roundtrip (~2×) now that the reader is mmap-backed and the
+    write path is lighter.
+  - **Trails** on single-threaded *construction* (array build ~2.5×, string
+    build ~3×) — Arrow's builders have the most tuned bulk-append paths.
 - The honest summary matches the plan's stated goal: a zero-overhead systems
   language **matches or beats a Python-wrapped C++ library**, with much simpler,
   more auditable code — while Arrow C++ still leads on its most tuned hot paths
@@ -110,8 +116,10 @@ Closing this needs an mmap-backed reader (see "future work").
 ## Future work surfaced by these numbers
 
 1. **Builder construction parity** — bulk/branch-light append paths to close the
-   ~2× gap to Arrow C++ on array and string build.
-2. **mmap-backed IPC reader** — to remove the eager 40 MB read and reach C++/
-   PyArrow IPC read latency.
-3. **End-to-end Large\* support** — make the IPC layer i64-offset-aware so
+   ~2–3× gap to Arrow C++ on array and string build (now the only place
+   OdinArrow trails).
+2. **End-to-end Large\* support** — make the IPC layer i64-offset-aware so
    LargeString/LargeBinary columns round-trip (tracked separately).
+
+_Done since the first run: the IPC reader is now memory-mapped, turning the
+former ~2× IPC-read deficit into a ~2× roundtrip win._
