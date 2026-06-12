@@ -9,66 +9,138 @@ import "core:mem"
 //
 // offsets always contains length+1 values; it is pre-seeded with [0].
 
+// Internal storage uses raw buffers (like Primitive_Builder) rather than
+// [dynamic] so each append is a direct indexed write + memcpy instead of going
+// through the dynamic-array runtime. finish() then hands those buffers straight
+// to the Array (zero-copy). `offsets` always holds length+1 entries with
+// offsets[0] == 0.
 String_Builder :: struct {
-	offsets:    [dynamic]i32,
-	data:       [dynamic]u8,
-	bitmap:     [dynamic]u8,
+	data:       [^]u8,   // utf8 bytes
+	data_len:   int,
+	data_cap:   int,
+	offsets:    [^]i32,  // length+1 valid entries; offsets[0] == 0
+	off_cap:    int,     // capacity in i32 elements
+	bitmap:     [^]u8,   // validity (all-zero = all valid); written lazily
+	bm_cap:     int,
 	null_count: int,
 	length:     int,
+	allocator:  mem.Allocator,
 }
 
 string_builder_make :: proc(initial_cap := 64, allocator := context.allocator) -> String_Builder {
-	bm_bytes := bitmap_byte_count(max(initial_cap, 1))
+	cap      := max(initial_cap, 1)
+	data_cap := cap * 8
+	off_cap  := cap + 1
+	bm       := bitmap_byte_count(cap)
+	data_raw, _ := mem.alloc(data_cap,              ARROW_ALIGNMENT, allocator)
+	off_raw,  _ := mem.alloc(off_cap * size_of(i32), ARROW_ALIGNMENT, allocator)
+	bm_raw,   _ := mem.alloc(bm,                     ARROW_ALIGNMENT, allocator)
+	mem.zero(bm_raw, bm)
 	b := String_Builder{
-		offsets = make([dynamic]i32, 0, initial_cap + 1, allocator),
-		data    = make([dynamic]u8,  0, initial_cap * 8, allocator),
-		bitmap  = make([dynamic]u8,  bm_bytes, bm_bytes, allocator),
+		data      = cast([^]u8)data_raw,  data_cap = data_cap,
+		offsets   = cast([^]i32)off_raw,  off_cap  = off_cap,
+		bitmap    = cast([^]u8)bm_raw,    bm_cap   = bm,
+		allocator = allocator,
 	}
-	append(&b.offsets, i32(0))
+	b.offsets[0] = 0
 	return b
 }
 
 string_builder_append :: proc(b: ^String_Builder, s: string) {
-	i := b.length
+	n := len(s)
+	if b.data_len + n > b.data_cap { _sb_grow_data(b, b.data_len + n) }
+	if b.length + 1 >= b.off_cap   { _sb_grow_offsets(b) }
+	if n > 0 { mem.copy(rawptr(&b.data[b.data_len]), rawptr(raw_data(s)), n) }
+	b.data_len += n
+	b.offsets[b.length + 1] = i32(b.data_len)
 	if b.null_count > 0 {
-		byte_i := i >> 3
-		if byte_i >= len(b.bitmap) { resize(&b.bitmap, byte_i + 1) }
-		b.bitmap[byte_i] |= 1 << u8(i & 7)
+		byte_i := b.length >> 3
+		if byte_i >= b.bm_cap { _sb_grow_bitmap(b, byte_i + 1) }
+		b.bitmap[byte_i] |= 1 << u8(b.length & 7)
 	}
-	append(&b.data, ..transmute([]u8)s)
-	append(&b.offsets, i32(len(b.data)))
 	b.length += 1
 }
 
 string_builder_append_null :: proc(b: ^String_Builder) {
-	i      := b.length
-	byte_i := i >> 3
-	if byte_i >= len(b.bitmap) { resize(&b.bitmap, byte_i + 1) }
-	if b.null_count == 0 { bitmap_set_all(raw_data(b.bitmap[:]), i) }
-	// Null bit stays 0 (pre-zeroed).
-	append(&b.offsets, b.offsets[len(b.offsets) - 1])
+	if b.length + 1 >= b.off_cap { _sb_grow_offsets(b) }
+	byte_i := b.length >> 3
+	if byte_i >= b.bm_cap { _sb_grow_bitmap(b, byte_i + 1) }
+	if b.null_count == 0 { bitmap_set_all(b.bitmap, b.length) }
+	// Null bit stays 0 (pre-zeroed); offset repeats the previous value.
+	b.offsets[b.length + 1] = i32(b.data_len)
 	b.null_count += 1
 	b.length += 1
 }
 
+// Zero-copy: hands the data/offsets/validity buffers directly to the Array and
+// leaves the builder empty (re-grows from nil on the next append).
 string_builder_finish :: proc(b: ^String_Builder, allocator := context.allocator) -> (arr: Array, err: mem.Allocator_Error) {
-	return _var_finish(b.offsets[:], b.data[:], b.bitmap[:], b.null_count, b.length, String_Type{}, allocator)
+	bitmap_buf: Buffer
+	if b.null_count > 0 {
+		bitmap_buf = Buffer{ data = b.bitmap, size = bitmap_byte_count(b.length), capacity = b.bm_cap, allocator = b.allocator }
+		b.bitmap = nil; b.bm_cap = 0
+	}
+	off_buf := Buffer{
+		data      = cast([^]u8)b.offsets,
+		size      = (b.length + 1) * size_of(i32),
+		capacity  = b.off_cap * size_of(i32),
+		allocator = b.allocator,
+	}
+	b.offsets = nil; b.off_cap = 0
+	data_buf := Buffer{ data = b.data, size = b.data_len, capacity = b.data_cap, allocator = b.allocator }
+	b.data = nil; b.data_cap = 0
+
+	arr = Array{
+		type       = String_Type{},
+		length     = b.length,
+		null_count = b.null_count,
+		offset     = 0,
+		buffers    = {bitmap_buf, off_buf, data_buf},
+	}
+	_ = allocator
+	return
 }
 
 string_builder_reset :: proc(b: ^String_Builder) {
-	clear(&b.offsets)
-	clear(&b.data)
-	clear(&b.bitmap)
-	append(&b.offsets, i32(0))
+	b.data_len   = 0
 	b.null_count = 0
 	b.length     = 0
+	if b.bitmap  != nil { mem.zero(rawptr(b.bitmap), b.bm_cap) }
+	if b.offsets != nil { b.offsets[0] = 0 }
 }
 
 string_builder_destroy :: proc(b: ^String_Builder) {
-	delete(b.offsets)
-	delete(b.data)
-	delete(b.bitmap)
+	if b.data    != nil { mem.free(rawptr(b.data),    b.allocator) }
+	if b.offsets != nil { mem.free(rawptr(b.offsets), b.allocator) }
+	if b.bitmap  != nil { mem.free(rawptr(b.bitmap),  b.allocator) }
 	b^ = {}
+}
+
+// ── String_Builder growth helpers ──────────────────────────────────────────────
+
+_sb_grow_data :: proc(b: ^String_Builder, needed: int) {
+	new_cap := max(b.data_cap * 2, needed, 16)
+	new_raw, _ := mem.resize(rawptr(b.data), b.data_cap, new_cap, ARROW_ALIGNMENT, b.allocator)
+	b.data     = cast([^]u8)new_raw
+	b.data_cap = new_cap
+}
+
+_sb_grow_offsets :: proc(b: ^String_Builder) {
+	new_cap := max(b.off_cap * 2, 16)  // elements
+	new_raw, _ := mem.resize(rawptr(b.offsets), b.off_cap * size_of(i32), new_cap * size_of(i32), ARROW_ALIGNMENT, b.allocator)
+	if b.off_cap == 0 { (cast([^]i32)new_raw)[0] = 0 }  // re-establish offsets[0] after a consuming finish
+	b.offsets = cast([^]i32)new_raw
+	b.off_cap = new_cap
+}
+
+_sb_grow_bitmap :: proc(b: ^String_Builder, needed: int) {
+	new_cap := max(b.bm_cap * 2, needed, 8)
+	new_raw, _ := mem.resize(rawptr(b.bitmap), b.bm_cap, new_cap, ARROW_ALIGNMENT, b.allocator)
+	if new_cap > b.bm_cap {
+		mem.zero(rawptr((cast([^]u8)new_raw)[b.bm_cap:]), new_cap - b.bm_cap)
+	}
+	b.bitmap = cast([^]u8)new_raw
+	b.bm_cap = new_cap
 }
 
 // ── Binary_Builder ────────────────────────────────────────────────────────────

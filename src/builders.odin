@@ -63,24 +63,33 @@ builder_append_null :: proc(b: ^Primitive_Builder($T)) {
 }
 
 // Produce an immutable Array from the builder's accumulated values.
+//
+// For every non-bool type this is zero-copy: the builder's data and validity
+// buffers are handed directly to the Array (no alloc + copy of the values),
+// and the builder is left empty so it can be safely destroyed or reused (the
+// next append re-grows from nil).  Bool still packs its 1-byte-per-value buffer
+// into a bitmap, which requires a fresh allocation.
 builder_finish :: proc(
 	b:         ^Primitive_Builder($T),
 	allocator := context.allocator,
 ) -> (arr: Array, err: mem.Allocator_Error) {
-	// Validity bitmap — only materialised when there are nulls.
+	// Validity bitmap — only materialised when there are nulls; transferred.
 	bitmap_buf: Buffer
 	if b.null_count > 0 {
-		n_bm := bitmap_byte_count(b.length)
-		bitmap_buf = buffer_make(n_bm, allocator) or_return
-		src_n := (b.length + 7) / 8
-		if src_n > 0 && b.bm_cap > 0 {
-			mem.copy(rawptr(bitmap_buf.data), rawptr(b.bitmap), min(src_n, b.bm_cap))
+		bitmap_buf = Buffer{
+			data      = b.bitmap,
+			size      = bitmap_byte_count(b.length),
+			capacity  = b.bm_cap,
+			allocator = b.allocator,
 		}
+		b.bitmap = nil
+		b.bm_cap = 0
 	}
 
 	// Data buffer.
 	data_buf: Buffer
 	when T == bool {
+		// Bool arrays are bit-packed, so the [^]bool scratch can't be reused.
 		n_data_bytes := bitmap_byte_count(b.length)
 		buf, buf_err := buffer_make(n_data_bytes, allocator)
 		if buf_err != nil { buffer_free(&bitmap_buf); err = buf_err; return }
@@ -89,11 +98,15 @@ builder_finish :: proc(
 		}
 		data_buf = buf
 	} else {
-		n_data_bytes := b.length * size_of(T)
-		buf, buf_err := buffer_make(n_data_bytes, allocator)
-		if buf_err != nil { buffer_free(&bitmap_buf); err = buf_err; return }
-		if b.length > 0 { mem.copy(rawptr(buf.data), rawptr(b.data), n_data_bytes) }
-		data_buf = buf
+		// Transfer ownership of the value buffer directly — no copy.
+		data_buf = Buffer{
+			data      = cast([^]u8)b.data,
+			size      = b.length * size_of(T),
+			capacity  = b.cap * size_of(T),
+			allocator = b.allocator,
+		}
+		b.data = nil
+		b.cap  = 0
 	}
 
 	arr = Array{
