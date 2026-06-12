@@ -222,7 +222,7 @@ plus min/max. Threaded variants (compute_*_parallel) fan out across all cores.
 ### Phase 6 — IPC Format
 Files: `ipc.odin` (self-contained back-to-front FlatBuffers builder)
 
-- [ ] Arrow IPC stream writer/reader (FlatBuffers schema)
+- [x] Arrow IPC stream writer/reader (footerless, sequential messages + EOS)
 - [x] Arrow IPC file writer/reader (Feather v2, seekable, random batch access)
 - [x] Cross-validated with PyArrow in both directions (int8/16/32/64,
       uint, float32/64, utf8, nulls, multiple record batches)
