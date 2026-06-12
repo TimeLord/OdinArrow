@@ -211,7 +211,7 @@ Priority order (by PyArrow benchmark value):
 - [x] `filter` (boolean mask → new array)
 - [x] `take` (index array → new array)
 - [x] `cast` (safe numeric casts)
-- [ ] `sort_indices`
+- [x] `sort_indices` (stable, nulls-last; matches PyArrow ordering)
 - [x] Arithmetic: `add`, `subtract`, `multiply`, `divide` (element-wise)
 
 SIMD targets: sum_i32, sum_f64, filter_i32 (these are PyArrow hot paths) — done,

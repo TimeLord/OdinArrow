@@ -581,3 +581,138 @@ compute_mul :: proc(left, right: ^Array, allocator := context.allocator) -> (Arr
 compute_div :: proc(left, right: ^Array, allocator := context.allocator) -> (Array, mem.Allocator_Error) {
 	return compute_arithmetic(left, right, .Div, allocator)
 }
+
+// ── sort_indices ────────────────────────────────────────────────────────────────
+
+// Return an Int64 array of indices that stably sorts `arr` in ascending order.
+// Nulls are ordered last (Arrow's default). The result can be fed directly into
+// compute_take to materialise the sorted array.
+compute_sort_indices :: proc(arr: ^Array, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
+	switch _ in arr.type {
+	case Int8_Type:    return _sort_indices_typed(arr, i8,  allocator)
+	case Int16_Type:   return _sort_indices_typed(arr, i16, allocator)
+	case Int32_Type:   return _sort_indices_typed(arr, i32, allocator)
+	case Int64_Type:   return _sort_indices_typed(arr, i64, allocator)
+	case UInt8_Type:   return _sort_indices_typed(arr, u8,  allocator)
+	case UInt16_Type:  return _sort_indices_typed(arr, u16, allocator)
+	case UInt32_Type:  return _sort_indices_typed(arr, u32, allocator)
+	case UInt64_Type:  return _sort_indices_typed(arr, u64, allocator)
+	case Float32_Type: return _sort_indices_typed(arr, f32, allocator)
+	case Float64_Type: return _sort_indices_typed(arr, f64, allocator)
+	case String_Type:  return _sort_indices_string(arr, allocator)
+	case Bool_Type, Null_Type, Binary_Type,
+	     Large_String_Type, Large_Binary_Type:
+		panic("compute_sort_indices: unsupported type")
+	}
+	return
+}
+
+// Stable bottom-up merge sort over the index array. `less[i] < less[j]` is
+// resolved by the caller-supplied ordering captured in `idx`; ties (including
+// null/null) keep the lower original index, giving a stable result.
+_sort_finish_indices :: proc(idx: []i64, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	b := builder_make(i64, max(len(idx), 1), allocator)
+	defer builder_destroy(&b)
+	for v in idx { builder_append(&b, v) }
+	return builder_finish(&b, allocator)
+}
+
+_sort_indices_typed :: proc(arr: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := arr.length
+	idx := make([]i64, n, context.temp_allocator)
+	for i in 0..<n { idx[i] = i64(i) }
+	if n <= 1 { return _sort_finish_indices(idx, allocator) }
+
+	data      := cast([^]T)arr.buffers[1].data
+	off       := arr.offset
+	has_nulls := arr.null_count != 0
+	vbits     := arr.buffers[0].data
+
+	// a ≤ b under "nulls last, then ascending value, ties keep order".
+	le :: #force_inline proc(data: [^]T, off: int, has_nulls: bool, vbits: [^]u8, ai, bi: i64) -> bool {
+		if has_nulls && vbits != nil {
+			an := !bitmap_get(vbits, off + int(ai))
+			bn := !bitmap_get(vbits, off + int(bi))
+			if an && bn { return true }   // both null → keep order
+			if an       { return false }  // a null → after b
+			if bn       { return true }   // b null → a before
+		}
+		return data[off + int(ai)] <= data[off + int(bi)]
+	}
+
+	tmp := make([]i64, n, context.temp_allocator)
+	width := 1
+	for width < n {
+		i := 0
+		for i < n {
+			lo  := i
+			mid := min(i + width, n)
+			hi  := min(i + 2*width, n)
+			a, b, k := lo, mid, lo
+			for a < mid && b < hi {
+				if le(data, off, has_nulls, vbits, idx[a], idx[b]) { tmp[k] = idx[a]; a += 1 }
+				else                                               { tmp[k] = idx[b]; b += 1 }
+				k += 1
+			}
+			for a < mid { tmp[k] = idx[a]; a += 1; k += 1 }
+			for b < hi  { tmp[k] = idx[b]; b += 1; k += 1 }
+			i += 2*width
+		}
+		copy(idx, tmp)
+		width *= 2
+	}
+	return _sort_finish_indices(idx, allocator)
+}
+
+_sort_indices_string :: proc(arr: ^Array, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := arr.length
+	idx := make([]i64, n, context.temp_allocator)
+	for i in 0..<n { idx[i] = i64(i) }
+	if n <= 1 { return _sort_finish_indices(idx, allocator) }
+
+	off       := arr.offset
+	has_nulls := arr.null_count != 0
+	vbits     := arr.buffers[0].data
+	offsets   := cast([^]i32)arr.buffers[1].data
+	bytes     := arr.buffers[2].data
+
+	get :: #force_inline proc(offsets: [^]i32, bytes: [^]u8, off: int, i: i64) -> string {
+		s := int(offsets[off + int(i)])
+		e := int(offsets[off + int(i) + 1])
+		if s == e { return "" }
+		return string(bytes[s:e])
+	}
+	le :: #force_inline proc(offsets: [^]i32, bytes: [^]u8, off: int, has_nulls: bool, vbits: [^]u8, ai, bi: i64) -> bool {
+		if has_nulls && vbits != nil {
+			an := !bitmap_get(vbits, off + int(ai))
+			bn := !bitmap_get(vbits, off + int(bi))
+			if an && bn { return true }
+			if an       { return false }
+			if bn       { return true }
+		}
+		return get(offsets, bytes, off, ai) <= get(offsets, bytes, off, bi)
+	}
+
+	tmp := make([]i64, n, context.temp_allocator)
+	width := 1
+	for width < n {
+		i := 0
+		for i < n {
+			lo  := i
+			mid := min(i + width, n)
+			hi  := min(i + 2*width, n)
+			a, b, k := lo, mid, lo
+			for a < mid && b < hi {
+				if le(offsets, bytes, off, has_nulls, vbits, idx[a], idx[b]) { tmp[k] = idx[a]; a += 1 }
+				else                                                         { tmp[k] = idx[b]; b += 1 }
+				k += 1
+			}
+			for a < mid { tmp[k] = idx[a]; a += 1; k += 1 }
+			for b < hi  { tmp[k] = idx[b]; b += 1; k += 1 }
+			i += 2*width
+		}
+		copy(idx, tmp)
+		width *= 2
+	}
+	return _sort_finish_indices(idx, allocator)
+}

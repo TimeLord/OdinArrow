@@ -428,3 +428,75 @@ test_compute_arithmetic_null_propagation :: proc(t: ^testing.T) {
 	testing.expect(t, oa.array_is_null(&result, 1))
 	testing.expect_value(t, oa.array_get(&result, 2, i32), i32(10))
 }
+
+// ── sort_indices ──────────────────────────────────────────────────────────────
+
+@(test)
+test_sort_indices_i32 :: proc(t: ^testing.T) {
+	a := build_array([]i32{30, 10, 20, 10, 40})
+	defer oa.array_free(&a)
+
+	idx, _ := oa.compute_sort_indices(&a)
+	defer oa.array_free(&idx)
+
+	// Ascending order; ties (two 10s at positions 1 and 3) stay in input order.
+	testing.expect_value(t, idx.length, 5)
+	testing.expect_value(t, oa.array_get(&idx, 0, i64), i64(1))
+	testing.expect_value(t, oa.array_get(&idx, 1, i64), i64(3))
+	testing.expect_value(t, oa.array_get(&idx, 2, i64), i64(2))
+	testing.expect_value(t, oa.array_get(&idx, 3, i64), i64(0))
+	testing.expect_value(t, oa.array_get(&idx, 4, i64), i64(4))
+
+	// Feeding the indices into take yields a sorted array.
+	sorted, _ := oa.compute_take(&a, &idx)
+	defer oa.array_free(&sorted)
+	testing.expect_value(t, oa.array_get(&sorted, 0, i32), i32(10))
+	testing.expect_value(t, oa.array_get(&sorted, 1, i32), i32(10))
+	testing.expect_value(t, oa.array_get(&sorted, 2, i32), i32(20))
+	testing.expect_value(t, oa.array_get(&sorted, 3, i32), i32(30))
+	testing.expect_value(t, oa.array_get(&sorted, 4, i32), i32(40))
+}
+
+@(test)
+test_sort_indices_nulls_last :: proc(t: ^testing.T) {
+	b := oa.builder_make(i32)
+	defer oa.builder_destroy(&b)
+	oa.builder_append(&b, i32(5))
+	oa.builder_append_null(&b)
+	oa.builder_append(&b, i32(1))
+	oa.builder_append_null(&b)
+	oa.builder_append(&b, i32(3))
+	a, _ := oa.builder_finish(&b)
+	defer oa.array_free(&a)
+
+	idx, _ := oa.compute_sort_indices(&a)
+	defer oa.array_free(&idx)
+
+	// Non-null ascending first: 1(@2), 3(@4), 5(@0); then nulls in order: @1, @3.
+	testing.expect_value(t, oa.array_get(&idx, 0, i64), i64(2))
+	testing.expect_value(t, oa.array_get(&idx, 1, i64), i64(4))
+	testing.expect_value(t, oa.array_get(&idx, 2, i64), i64(0))
+	testing.expect_value(t, oa.array_get(&idx, 3, i64), i64(1))
+	testing.expect_value(t, oa.array_get(&idx, 4, i64), i64(3))
+}
+
+@(test)
+test_sort_indices_string :: proc(t: ^testing.T) {
+	sb := oa.string_builder_make()
+	defer oa.string_builder_destroy(&sb)
+	oa.string_builder_append(&sb, "pear")
+	oa.string_builder_append(&sb, "apple")
+	oa.string_builder_append(&sb, "cherry")
+	oa.string_builder_append(&sb, "apple")
+	a, _ := oa.string_builder_finish(&sb)
+	defer oa.array_free(&a)
+
+	idx, _ := oa.compute_sort_indices(&a)
+	defer oa.array_free(&idx)
+
+	// apple(@1), apple(@3) stable, cherry(@2), pear(@0)
+	testing.expect_value(t, oa.array_get(&idx, 0, i64), i64(1))
+	testing.expect_value(t, oa.array_get(&idx, 1, i64), i64(3))
+	testing.expect_value(t, oa.array_get(&idx, 2, i64), i64(2))
+	testing.expect_value(t, oa.array_get(&idx, 3, i64), i64(0))
+}
