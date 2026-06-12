@@ -75,15 +75,39 @@ the vanished pages. Document that mmap'd reads assume a stable file, and offer a
 
 ## B. Performance — compatible (keep full Arrow interop)
 
-### B1. Build with an actual SIMD target — *high impact, trivial effort*
-Nothing in `Makefile`/`compare.sh` passes `-microarch:` — builds use `-o:speed`
-only, which targets the **baseline x86-64 (SSE2, 128-bit)**. The 256-bit
-`#simd[4]f64` and the AVX2 `vpminsd`/`vpaddq` patterns in `compute_simd.odin`
-are therefore emitted as **pairs of 128-bit ops or scalarised**. Simply building
-the numeric paths with `-microarch:native` (or `-target-features:"+avx2"`)
-should give the aggregation/min-max kernels a real step up for free.
-For shipped binaries, pair this with **runtime CPU dispatch** (detect AVX2/
-AVX-512 once, call the widest kernel) so a single build stays portable.
+### B1. Build with an actual SIMD target — *investigated: no win here (memory-bound)*
+Builds use `-o:speed` only (no `-microarch:`), so codegen targets the baseline
+x86-64 (SSE2, 128-bit); the 256-bit `#simd[4]f64` and the AVX2 min/max patterns
+in `compute_simd.odin` are split to 128-bit. The hypothesis was that
+`-microarch:native` would widen these for free.
+
+**Measured (i7-7700HQ, interleaved median-of-5, threaded kernels):**
+
+| kernel | baseline (SSE2) | `-microarch:native` (AVX2) |
+|---|---:|---:|
+| sum 10M f64   | ~3.13 ms | ~3.15 ms (flat) |
+| sum 10M i32   | ~2.0 ms  | **~4.9 ms (2.5× slower)** |
+| min+max 10M i32 | ~1.95 ms | ~1.93 ms (flat) |
+| filter 10M i32  | ~11.5 ms | ~11.5 ms (flat) |
+
+So at 10M elements the threaded reductions are **memory-bandwidth-bound**, not
+compute-bound — eight cores already saturate DRAM, so a wider vector adds
+nothing. Worse, AVX2 codegen for the i32→i64 widening sum is a regression
+(likely the sign-extend/accumulate sequence and/or AVX frequency licensing on
+this µarch). Enabling `-microarch:native` was therefore **reverted** — it
+regresses the suite and helps nothing measurable.
+
+**Revised conclusion:** SIMD width is not the lever for large-array aggregation;
+**reducing memory traffic is.** That redirects the effort to B2 (don't make extra
+passes for null handling), C3 (fuse pipelines so the data is read once), and C4
+(operate on compressed/encoded data so there are fewer bytes to move). A
+narrower, still-real B1 remains for the *compute-bound, in-cache* regime
+(small/medium arrays, or fused kernels that are no longer DRAM-limited): there,
+per-element SIMD width does matter, and **runtime CPU dispatch** (detect AVX2/
+AVX-512 once, pick the widest kernel) is worth it — but only after a kernel is
+demonstrably not bandwidth-limited. The i32-sum AVX2 regression should be fixed
+(rewrite `_sum_i32_simd` with explicit `#simd` widening) before any dispatch so
+the wide path is never slower than the narrow one.
 
 ### B2. Null-aware bulk aggregation — *high*
 The null path of `_sum_typed`/`_min_typed`/`_max_typed` is a per-element
@@ -175,11 +199,20 @@ IPC as the interchange format; use the native one for OdinArrow-to-OdinArrow.
 
 ## Suggested ordering
 
-1. **B1** (SIMD build target / runtime dispatch) — largest effort-adjusted win,
-   essentially free, and makes every later SIMD change count.
-2. **A1–A4** (reader hardening behind a `trusted` flag) — correctness/safety
+Updated after the B1 measurement showed large-array aggregation is
+bandwidth-bound (so SIMD width is not the lever — memory traffic is):
+
+1. **A1–A4** (reader hardening behind a `trusted` flag) — correctness/safety
    before any of this is pointed at real files.
-3. **B2, B5** (null-aware aggregation, persistent thread pool) — big, compatible.
-4. **B4** (SIMD filter/take), **B3** (wider SIMD coverage).
-5. **C2 → C1 → C3** — the structural changes that move OdinArrow from "matches
-   Arrow C++" to "beats it," in increasing order of effort.
+2. **B2, B5** (null-aware aggregation, persistent thread pool) — big, compatible;
+   B2 also removes a memory pass, which is what actually helps here.
+3. **B4** (SIMD filter/take), **B3** (wider SIMD coverage) — filter/take are not
+   purely bandwidth-bound (branchy / scatter-gather), so vectorising them should
+   pay off where the reductions didn't.
+4. **C2 → C4 → C1 → C3** — the structural changes that cut memory traffic and
+   move OdinArrow from "matches Arrow C++" to "beats it," in increasing effort.
+   These (selection vectors, encoding-aware kernels, fusion) attack the actual
+   bottleneck the B1 experiment surfaced: bytes moved, not vector width.
+5. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
+   compute-bound (small/in-cache or post-fusion), and only after fixing the
+   `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.
