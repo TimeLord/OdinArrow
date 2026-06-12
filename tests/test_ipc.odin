@@ -146,6 +146,78 @@ test_ipc_write_read_string :: proc(t: ^testing.T) {
     testing.expect_value(t, oa.array_get_string(nm, 2), "charlie")
 }
 
+// ── IPC stream format ─────────────────────────────────────────────────────────
+
+@(test)
+test_ipc_stream_roundtrip :: proc(t: ^testing.T) {
+    path := "/tmp/test_ipc_stream.arrows"
+    defer os.remove(path)
+
+    fields := []oa.Field{oa.field_make("n", oa.Int32_Type{})}
+    schema, _ := oa.schema_make(fields)
+    defer oa.schema_free(&schema)
+
+    a1 := make_i32_array([]i32{1, 2, 3})
+    a2 := make_i32_array([]i32{4, 5})
+    b1, _ := oa.record_batch_make(&schema, []oa.Array{a1})
+    b2, _ := oa.record_batch_make(&schema, []oa.Array{a2})
+    defer oa.record_batch_free(&b1); defer oa.record_batch_free(&b2)
+
+    write_ok := oa.ipc_write_stream(path, &schema, []oa.Record_Batch{b1, b2})
+    testing.expect(t, write_ok, "ipc_write_stream failed")
+
+    schema2, batches, read_ok := oa.ipc_read_stream(path)
+    testing.expect(t, read_ok, "ipc_read_stream failed")
+    defer {
+        oa.schema_free(schema2)
+        free(schema2)
+        for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+        delete(batches)
+    }
+
+    testing.expect_value(t, len(batches), 2)
+    testing.expect_value(t, len(schema2.fields), 1)
+    testing.expect_value(t, schema2.fields[0].name, "n")
+    testing.expect_value(t, batches[0].length, 3)
+    testing.expect_value(t, batches[1].length, 2)
+
+    c0 := oa.record_batch_column_at(&batches[0], 0)
+    c1 := oa.record_batch_column_at(&batches[1], 0)
+    testing.expect_value(t, oa.array_get(c0, 0, i32), i32(1))
+    testing.expect_value(t, oa.array_get(c0, 2, i32), i32(3))
+    testing.expect_value(t, oa.array_get(c1, 1, i32), i32(5))
+}
+
+@(test)
+test_ipc_stream_string :: proc(t: ^testing.T) {
+    path := "/tmp/test_ipc_stream_str.arrows"
+    defer os.remove(path)
+
+    fields := []oa.Field{oa.field_make("s", oa.String_Type{})}
+    schema, _ := oa.schema_make(fields)
+    defer oa.schema_free(&schema)
+
+    col := make_string_array([]string{"one", "two", "three"})
+    batch, _ := oa.record_batch_make(&schema, []oa.Array{col})
+    defer oa.record_batch_free(&batch)
+
+    testing.expect(t, oa.ipc_write_stream(path, &schema, []oa.Record_Batch{batch}))
+
+    schema2, batches, ok := oa.ipc_read_stream(path)
+    testing.expect(t, ok)
+    defer {
+        oa.schema_free(schema2)
+        free(schema2)
+        for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+        delete(batches)
+    }
+
+    testing.expect_value(t, len(batches), 1)
+    s := oa.record_batch_column_at(&batches[0], 0)
+    testing.expect_value(t, oa.array_get_string(s, 0), "one")
+    testing.expect_value(t, oa.array_get_string(s, 2), "three")
+}
+
 @(test)
 test_ipc_multiple_batches :: proc(t: ^testing.T) {
     path := "/tmp/test_ipc_multi.arrow"

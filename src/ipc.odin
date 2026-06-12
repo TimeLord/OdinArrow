@@ -586,16 +586,18 @@ ipc_write_file :: proc(path: string, schema: ^Schema, batches: []Record_Batch) -
 
 // Write one encapsulated IPC message.  Returns body_length (rounded up to 8).
 _ipc_write_message :: proc(f: ^os.File, meta: []u8, body_descs: []IPC_Body_Buffer, offset: ^i64) -> i64 {
-    // Arrow spec: metadata_size = size of flatbuffer (unpadded).
-    // Padding to 8-byte alignment is written after the metadata but NOT counted.
-    meta_len := i32(len(meta))
+    // Arrow spec: the on-wire metadata_size INCLUDES the padding that follows
+    // the flatbuffer, so the body begins exactly at (here + 8 + metadata_size)
+    // and metadata_size is a multiple of 8.  Writing the unpadded length instead
+    // makes a stream reader mistake the padding zeros for the EOS marker.
     pad := i64((8 - (len(meta) % 8)) % 8)
+    meta_size := i32(i64(len(meta)) + pad)
 
     _ipc_write_i32(f, IPC_CONTINUATION)
-    _ipc_write_i32(f, meta_len)
+    _ipc_write_i32(f, meta_size)
     os.write(f, meta)
     for _ in i64(0)..<pad { _ipc_write_u8(f, 0) }
-    offset^ += 8 + i64(meta_len) + pad
+    offset^ += 8 + i64(meta_size)
 
     if body_descs == nil { return 0 }
 
@@ -708,6 +710,105 @@ ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: 
     // Hand the backing block to the first batch (its columns are views into it);
     // record_batch_free releases it once.  Other batches reference it but never
     // free it, and view buffers are no-ops at free time, so free order is safe.
+    if len(batches) > 0 {
+        batches[0]._owned_backing = data
+        keep_data = true
+    }
+    ok = true
+    return
+}
+
+// ── Stream format ─────────────────────────────────────────────────────────────
+//
+// The IPC stream format is the same encapsulated messages as the file format
+// but without the "ARROW1" magic or the trailing footer/Block index: just a
+// Schema message, the RecordBatch messages, and an end-of-stream marker.  It is
+// read strictly sequentially (no random batch access), which suits sockets,
+// pipes, and stdout.
+
+// Write a schema + batches as an Arrow IPC stream.
+ipc_write_stream :: proc(path: string, schema: ^Schema, batches: []Record_Batch) -> bool {
+    f, err := os.open(path, {.Write, .Create, .Trunc}, os.Permissions_Default_File)
+    if err != nil { return false }
+    defer os.close(f)
+
+    offset := i64(0)
+
+    schema_meta := _ipc_encode_schema(schema)
+    defer delete(schema_meta)
+    _ipc_write_message(f, schema_meta, nil, &offset)
+
+    for i in 0..<len(batches) {
+        body_descs := make([dynamic]IPC_Body_Buffer, 0, 32)
+        defer delete(body_descs)
+        rb_meta := _ipc_encode_record_batch(&batches[i], &body_descs)
+        defer delete(rb_meta)
+        _ipc_write_message(f, rb_meta, body_descs[:], &offset)
+    }
+
+    // End-of-stream: continuation marker followed by a zero metadata length.
+    _ipc_write_u32(f, 0xFFFF_FFFF)
+    _ipc_write_u32(f, 0)
+    return true
+}
+
+// Read an Arrow IPC stream.  The caller owns the returned schema and batches
+// exactly as with ipc_read_file (free batches, then schema_free + free(schema)).
+ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
+    data, read_err := os.read_entire_file(path, allocator)
+    if read_err != nil { return }
+    keep_data := false
+    defer if !keep_data { delete(data, allocator) }
+
+    n := len(data)
+    schema = new(Schema, allocator)
+    schema_ok := false
+    batch_list := make([dynamic]Record_Batch, 0, 8, allocator)
+
+    pos := 0
+    for pos + 8 <= n {
+        cont := _rd_i32(data, pos)
+        meta_size:  int
+        meta_start: int
+        if cont == IPC_CONTINUATION {        // 0xFFFFFFFF + size
+            meta_size  = int(_rd_i32(data, pos+4))
+            meta_start = pos + 8
+        } else {                              // legacy framing: bare size
+            meta_size  = int(cont)
+            meta_start = pos + 4
+        }
+        if meta_size <= 0 { break }           // end-of-stream
+        if meta_start + meta_size > n { break }
+
+        meta := data[meta_start : meta_start+meta_size]
+        header_type, body_length := _ipc_parse_message_header(meta)
+        body_start := (meta_start + meta_size + 7) & ~int(7)
+
+        switch header_type {
+        case _IPC_HEADER_SCHEMA:
+            if _ipc_decode_schema(meta, schema, allocator) { schema_ok = true }
+            pos = body_start  // schema message carries no body
+        case _IPC_HEADER_RECORD_BATCH:
+            body_padded := (int(body_length) + 7) & ~int(7)
+            body_end := body_start + int(body_length)
+            if body_end > n { body_end = n }
+            batch, bok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator)
+            if bok { append(&batch_list, batch) }
+            pos = body_start + body_padded
+        case:
+            // Unknown/dictionary message — cannot advance safely.
+            pos = n
+        }
+    }
+
+    if !schema_ok {
+        free(schema, allocator)
+        delete(batch_list)
+        schema = nil
+        return
+    }
+
+    batches = batch_list[:]
     if len(batches) > 0 {
         batches[0]._owned_backing = data
         keep_data = true
