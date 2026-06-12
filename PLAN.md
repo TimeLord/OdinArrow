@@ -166,39 +166,40 @@ fallback handles the tail (length % lane_width remaining elements).
 ### Phase 1 — Core Memory (start here)
 Files: `buffer.odin`, `bitmap.odin`
 
-- [ ] Aligned buffer alloc/free (64-byte)
-- [ ] Buffer: resize, copy, slice (view, no copy)
-- [ ] Bitmap: set/clear/get bit, popcount (null_count recount)
-- [ ] Bitmap: SIMD popcount via `intrinsics.simd_*`
+- [x] Aligned buffer alloc/free (64-byte)
+- [x] Buffer: resize, copy, slice (view, no copy)
+- [x] Bitmap: set/clear/get bit, popcount (null_count recount)
+- [x] Bitmap: word-at-a-time popcount via `intrinsics.count_ones`
 
 **Tests**: buffer alignment, bitmap correctness, popcount vs naive
 
 ### Phase 2 — Type System & Primitive Arrays
 Files: `types.odin`, `array.odin`, `builders.odin`
 
-- [ ] DataType union + bit_width / is_variable_length helpers
-- [ ] Array struct + slice (zero-copy), is_null, value accessors
-- [ ] Builders for: Bool, Int8/16/32/64, UInt8/16/32/64, Float32/64
-- [ ] `finish()` → Array (builder → immutable Arrow array)
+- [x] DataType union + bit_width / is_variable_length helpers
+- [x] Array struct + slice (zero-copy), is_null, value accessors
+- [x] Builders for: Bool, Int8/16/32/64, UInt8/16/32/64, Float32/64
+- [x] `finish()` → Array (builder → immutable Arrow array)
 
 **Tests**: roundtrip build → read for every primitive type, null counts, slice correctness
 
 ### Phase 3 — Variable-Length Arrays
 Files: `array.odin` (extended), `builders.odin` (extended)
 
-- [ ] String / Binary arrays (i32 offsets buffer)
-- [ ] LargeString / LargeBinary (i64 offsets)
-- [ ] String_Builder: append_string, append_null, finish
+- [x] String / Binary arrays (i32 offsets buffer)
+- [~] LargeString / LargeBinary (i64 offsets) — type tags defined and handled
+      in compute/IPC; dedicated i64-offset builder still pending
+- [x] String_Builder: append_string, append_null, finish
 
 **Tests**: offset invariants, null strings, unicode content
 
 ### Phase 4 — Schema, RecordBatch, Table
 Files: `schema.odin`, `record_batch.odin`, `table.odin`
 
-- [ ] Field + Schema validation
-- [ ] RecordBatch: construct, validate column lengths match
-- [ ] Chunked_Array: logical length, chunk iteration
-- [ ] Table: from_record_batches, column_by_name
+- [x] Field + Schema validation
+- [x] RecordBatch: construct, validate column lengths match
+- [x] Chunked_Array: logical length, chunk iteration
+- [x] Table: from_record_batches, column_by_name
 
 **Tests**: schema mismatch errors, multi-chunk column access
 
