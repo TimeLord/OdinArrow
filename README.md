@@ -102,12 +102,14 @@ the script builds the Odin and C++ runners).
 Requires the [Odin compiler](https://odin-lang.org/docs/install/).
 
 ```sh
-make test                          # build + run the test suite (-vet -strict-style)
-odin build src -out:libodinarrow   # build the package
+make test                              # build + run the test suite (-vet -strict-style)
+odin run examples/quickstart -out:/tmp/quickstart   # run the runnable demo
+odin build src -out:libodinarrow       # build the package
 ```
 
 To use it in your own project, import the `src` directory as the `odinarrow`
-package.
+package. A complete, runnable tour of the API lives in
+[`examples/quickstart`](examples/quickstart/main.odin).
 
 ## Capabilities
 
@@ -131,6 +133,7 @@ See [`PLAN.md`](PLAN.md) for the full design and phase breakdown.
 src/                 the odinarrow package (buffers, types, arrays, builders,
                      compute, ipc, buffer_pool, ...)
 tests/               the test suite (run with `make test`)
+examples/quickstart/ a runnable tour of the API
 benchmarks/          odin / python / cpp runners + compare.sh + RESULTS.md
 programs/            CSV<->Parquet example programs (OdinArrow and Arrow-FFI)
 ```
