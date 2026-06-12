@@ -187,8 +187,9 @@ Files: `types.odin`, `array.odin`, `builders.odin`
 Files: `array.odin` (extended), `builders.odin` (extended)
 
 - [x] String / Binary arrays (i32 offsets buffer)
-- [~] LargeString / LargeBinary (i64 offsets) — type tags defined and handled
-      in compute/IPC; dedicated i64-offset builder still pending
+- [x] LargeString / LargeBinary (i64 offsets) — builders + zero-copy accessors
+      (NB: the IPC writer still encodes variable-length columns with i32-offset
+      width, so Large* columns should not yet be round-tripped through IPC)
 - [x] String_Builder: append_string, append_null, finish
 
 **Tests**: offset invariants, null strings, unicode content

@@ -203,3 +203,84 @@ test_string_large :: proc(t: ^testing.T) {
 	testing.expect(t, oa.array_is_null(&arr, 0))
 	testing.expect_value(t, oa.array_get_string(&arr, 1), "hello")
 }
+
+// ── LargeString (i64 offsets) ──────────────────────────────────────────────────
+
+@(test)
+test_large_string_roundtrip :: proc(t: ^testing.T) {
+	words := []string{"hello", "world", "odin", "arrow", "λambda"}
+	b := oa.large_string_builder_make()
+	defer oa.large_string_builder_destroy(&b)
+	for w in words { oa.large_string_builder_append(&b, w) }
+
+	arr, err := oa.large_string_builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	testing.expect(t, err == nil)
+	_, is_large := arr.type.(oa.Large_String_Type)
+	testing.expect(t, is_large, "type should be Large_String_Type")
+	testing.expect_value(t, arr.length, len(words))
+	testing.expect_value(t, arr.null_count, 0)
+	for w, i in words {
+		testing.expect_value(t, oa.array_get_large_string(&arr, i), w)
+	}
+
+	// Offsets buffer must hold i64 values: byte length = (n+1)*8.
+	testing.expect_value(t, arr.buffers[1].size, (len(words) + 1) * size_of(i64))
+}
+
+@(test)
+test_large_string_nulls_and_empty :: proc(t: ^testing.T) {
+	b := oa.large_string_builder_make()
+	defer oa.large_string_builder_destroy(&b)
+	oa.large_string_builder_append(&b, "a")
+	oa.large_string_builder_append_null(&b)
+	oa.large_string_builder_append(&b, "")
+	oa.large_string_builder_append(&b, "ccc")
+
+	arr, _ := oa.large_string_builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	testing.expect_value(t, arr.length, 4)
+	testing.expect_value(t, arr.null_count, 1)
+	testing.expect_value(t, oa.array_get_large_string(&arr, 0), "a")
+	testing.expect(t, oa.array_is_null(&arr, 1))
+	testing.expect_value(t, oa.array_get_large_string(&arr, 2), "")
+	testing.expect_value(t, oa.array_get_large_string(&arr, 3), "ccc")
+}
+
+@(test)
+test_large_string_slice :: proc(t: ^testing.T) {
+	b := oa.large_string_builder_make()
+	defer oa.large_string_builder_destroy(&b)
+	words := []string{"zero", "one", "two", "three"}
+	for w in words { oa.large_string_builder_append(&b, w) }
+	arr, _ := oa.large_string_builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	// Zero-copy slice [1:3] → "one", "two".
+	s := oa.array_slice(arr, 1, 3)
+	testing.expect_value(t, s.length, 2)
+	testing.expect_value(t, oa.array_get_large_string(&s, 0), "one")
+	testing.expect_value(t, oa.array_get_large_string(&s, 1), "two")
+}
+
+@(test)
+test_large_binary_roundtrip :: proc(t: ^testing.T) {
+	b := oa.large_binary_builder_make()
+	defer oa.large_binary_builder_destroy(&b)
+	oa.large_binary_builder_append(&b, []u8{0x00, 0xFF, 0x10})
+	oa.large_binary_builder_append_null(&b)
+	oa.large_binary_builder_append(&b, []u8{0x42})
+
+	arr, _ := oa.large_binary_builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	_, is_large := arr.type.(oa.Large_Binary_Type)
+	testing.expect(t, is_large, "type should be Large_Binary_Type")
+	testing.expect_value(t, arr.length, 3)
+	testing.expect_value(t, arr.null_count, 1)
+	testing.expect(t, mem.compare(oa.array_get_large_binary(&arr, 0), []u8{0x00, 0xFF, 0x10}) == 0)
+	testing.expect(t, oa.array_is_null(&arr, 1))
+	testing.expect(t, mem.compare(oa.array_get_large_binary(&arr, 2), []u8{0x42}) == 0)
+}
