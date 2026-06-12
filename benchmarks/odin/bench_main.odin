@@ -1,6 +1,7 @@
 package bench_odinarrow
 
 import "core:fmt"
+import "core:mem"
 import "core:slice"
 import "core:time"
 import oa "../../src"
@@ -11,6 +12,12 @@ TRIALS   :: 5
 
 // Prevent the optimizer from eliminating benchmark computations.
 _sink: f64
+
+// Builder construction uses a reusable buffer pool, mirroring how Arrow's
+// default memory pool recycles buffers across builds (warm pages, no re-faulting
+// each trial). Set up in main().
+g_pool:  oa.Buffer_Pool
+g_alloc: mem.Allocator
 
 // ── harness ───────────────────────────────────────────────────────────────────
 
@@ -34,7 +41,7 @@ bench :: proc(f: proc() -> u64) -> u64 {
 
 bench_array_build :: proc() -> u64 {
 	t0 := time.tick_now()
-	b := oa.builder_make(i32, N_LARGE)
+	b := oa.builder_make(i32, N_LARGE, g_alloc)
 	for i in 0..<N_LARGE {
 		if i % 100 == 0 {
 			oa.builder_append_null(&b)
@@ -42,9 +49,9 @@ bench_array_build :: proc() -> u64 {
 			oa.builder_append(&b, i32(i))
 		}
 	}
-	arr, _ := oa.builder_finish(&b)
+	arr, _ := oa.builder_finish(&b, g_alloc)
 	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	oa.array_free(&arr)
+	oa.array_free(&arr)        // buffers return to the pool (via their allocator)
 	oa.builder_destroy(&b)
 	return ns
 }
@@ -121,7 +128,7 @@ bench_filter_i32_mt :: proc() -> u64 {
 
 bench_string_build :: proc() -> u64 {
 	t0 := time.tick_now()
-	b := oa.string_builder_make(N_STRING)
+	b := oa.string_builder_make(N_STRING, g_alloc)
 	for i in 0..<N_STRING {
 		if i % 50 == 0 {
 			oa.string_builder_append_null(&b)
@@ -129,9 +136,9 @@ bench_string_build :: proc() -> u64 {
 			oa.string_builder_append(&b, "hello_world")
 		}
 	}
-	arr, _ := oa.string_builder_finish(&b)
+	arr, _ := oa.string_builder_finish(&b, g_alloc)
 	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
-	oa.array_free(&arr)
+	oa.array_free(&arr)        // buffers return to the pool
 	oa.string_builder_destroy(&b)
 	return ns
 }
@@ -190,6 +197,10 @@ bench_ipc_roundtrip :: proc() -> u64 {
 // ── main ──────────────────────────────────────────────────────────────────────
 
 main :: proc() {
+	oa.buffer_pool_init(&g_pool)
+	g_alloc = oa.buffer_pool_allocator(&g_pool)
+	defer oa.buffer_pool_destroy(&g_pool)
+
 	report("array_build_10m_i32", bench(bench_array_build))
 	report("sum_10m_f64_mt",      bench(bench_sum_f64_mt))
 	report("sum_10m_i32_mt",      bench(bench_sum_i32_mt))

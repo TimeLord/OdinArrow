@@ -22,11 +22,12 @@ Primitive_Builder :: struct($T: typeid) {
 builder_make :: proc($T: typeid, initial_cap := 64, allocator := context.allocator) -> Primitive_Builder(T) {
 	cap := max(initial_cap, 1)
 	bm  := bitmap_byte_count(cap)
-	data_raw, _ := mem.alloc(cap * size_of(T), ARROW_ALIGNMENT, allocator)
-	bm_raw,   _ := mem.alloc(bm,               ARROW_ALIGNMENT, allocator)
-	mem.zero(bm_raw, bm)   // all-zero → valid bits written lazily
+	// Values are fully overwritten before the array is read, so the data buffer
+	// is left uninitialised; the bitmap must start zeroed (lazy valid bits).
+	data_bytes, _ := mem.alloc_bytes_non_zeroed(cap * size_of(T), ARROW_ALIGNMENT, allocator)
+	bm_raw,     _ := mem.alloc(bm, ARROW_ALIGNMENT, allocator)
 	return Primitive_Builder(T){
-		data      = cast([^]T)data_raw,
+		data      = cast([^]T)raw_data(data_bytes),
 		cap       = cap,
 		bitmap    = cast([^]u8)bm_raw,
 		bm_cap    = bm,

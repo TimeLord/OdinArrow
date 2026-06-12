@@ -29,31 +29,30 @@ apples-to-apples.
 
 | Benchmark | Threading | OdinArrow (ms) | PyArrow (ms) | Arrow C++ (ms) | Py/Odin | C++/Odin |
 |---|---|---:|---:|---:|---:|---:|
-| Build 10M i32 (1% nulls) | all single | 72.97 | 963.43 | 40.48 | 13.20× | 0.55× |
-| Sum 10M f64 | Odin MT | 3.24 | 6.21 | 5.95 | 1.92× | 1.84× |
-| Sum 10M i32 | Odin MT | 1.84 | 2.34 | 2.48 | 1.27× | 1.35× |
-| Min+Max 10M i32 | Odin MT | 2.11 | 4.72 | 2.27 | 2.24× | 1.08× |
-| Filter 10M i32 (50% pass) | Odin MT | 12.75 | 36.35 | 37.51 | 2.85× | 2.94× |
-| Build 1M strings (2% nulls) | all single | 10.75 | 90.97 | 6.49 | 8.47× | 0.60× |
-| Scan 1M strings | all single | 1.24 | 10.13 | 9.33 | 8.20× | 7.55× |
-| IPC roundtrip 10M i32 (w+r) | all single | 5.38 | 11.43 | 10.01 | 2.12× | 1.86× |
+| Build 10M i32 (1% nulls) | all single | 44.20 | 957.49 | 41.69 | 21.66× | 0.94× |
+| Sum 10M f64 | Odin MT | 3.49 | 6.20 | 6.08 | 1.77× | 1.74× |
+| Sum 10M i32 | Odin MT | 2.05 | 2.45 | 2.47 | 1.20× | 1.20× |
+| Min+Max 10M i32 | Odin MT | 2.01 | 4.07 | 2.23 | 2.03× | 1.11× |
+| Filter 10M i32 (50% pass) | Odin MT | 13.16 | 36.13 | 39.52 | 2.75× | 3.00× |
+| Build 1M strings (2% nulls) | all single | 8.50 | 91.48 | 7.25 | 10.77× | 0.85× |
+| Scan 1M strings | all single | 1.04 | 9.49 | 9.16 | 9.11× | 8.80× |
+| IPC roundtrip 10M i32 (w+r) | all single | 5.24 | 10.97 | 10.27 | 2.09× | 1.96× |
 
 Ratios > 1× mean OdinArrow is faster; < 1× mean it is slower.
-(IPC read is memory-mapped and `finish()` is zero-copy — see the analysis below.)
+(Builders use a reusable buffer pool; IPC read is mmap'd and `finish()` is
+zero-copy — see the analysis below.)
 
 ## Per-benchmark analysis
 
-### Array build — 10M i32 (Odin 0.55× C++, 13× Python)
-OdinArrow's raw-buffer builder (direct indexed writes, lazy validity bitmap)
-beats PyArrow by ~13×, but that gap is mostly **Python-side overhead**: PyArrow's
-~960 ms is dominated by materialising a 10M-element Python list before Arrow ever
-sees it, not by Arrow itself. Against Arrow C++ — the honest comparison —
-OdinArrow is **~1.8× slower**. `finish()` is now **zero-copy** (the builder hands
-its value/validity buffers straight to the Array instead of allocating and
-copying 40 MB), which removed the entire ~22 ms finish step; what remains is the
-per-element append loop. The residual gap to Arrow C++ is mostly its pooled
-allocator reusing warm (already-faulted) pages across trials, where OdinArrow
-faults in fresh pages each build.
+### Array build — 10M i32 (Odin 0.94× C++, 22× Python)
+Now at **parity with Arrow C++** (within ~6%). Three optimizations got here:
+**zero-copy `finish()`** (the builder hands its value/validity buffers straight
+to the Array — no 40 MB alloc+copy), **uninitialised data allocation** (the value
+buffer is fully overwritten, so the redundant zeroing pass is skipped), and a
+**reusable buffer pool** (`Buffer_Pool`) that recycles freed blocks instead of
+returning them to the OS — so repeated builds reuse warm, already-faulted pages
+exactly like Arrow's default memory pool does. The ~13× edge over PyArrow is
+still mostly Python-list materialisation overhead.
 
 ### Sum f64 / i32 (Odin 1.9–2.2× C++, threaded)
 Multi-accumulator SIMD kernels fanned across 8 threads. On a 4-core machine the
@@ -73,13 +72,12 @@ popcount, then runs a byte-at-a-time mask loop, parallelised. Filtering writes a
 full output array, so it scales better with threads than the reductions do.
 Even discounting threading (~4× headroom), the per-core path is competitive.
 
-### String build — 1M strings (Odin 0.60× C++, 8.5× Python)
+### String build — 1M strings (Odin 0.85× C++, 11× Python)
 The `String_Builder` was rewritten from `[dynamic]` to **raw buffers** (direct
 `memcpy` of the bytes + indexed offset write, no dynamic-array runtime per
-append) with the same **zero-copy `finish()`**. That roughly halved the time —
-from ~30 ms (≈0.31× C++) to ~10.75 ms (**0.60× C++**), now ~1.6× slower than
-Arrow C++'s `StringBuilder` rather than ~3×. The remaining gap is the data-buffer
-growth realloc and, again, pooled vs fresh pages.
+append), with **zero-copy `finish()`**, **uninitialised data/offset buffers**,
+and the same **buffer pool**. Time fell from ~30 ms (0.31× C++) to ~8.5 ms
+(**0.85× C++**) — now within ~1.2× of Arrow C++'s `StringBuilder`, from ~3×.
 
 ### String scan — 1M strings (Odin ~11.7× both)
 OdinArrow walks the offsets buffer in a tight loop summing lengths. PyArrow and
@@ -112,10 +110,10 @@ reader transparently falls back to a full read.
     a generic compute kernel for a trivial operation.
   - **Wins** the IPC roundtrip (~2×) now that the reader is mmap-backed and the
     write path is lighter.
-  - **Trails** on single-threaded *construction* (array build ~1.8×, string
-    build ~1.6×) — much narrower after zero-copy `finish()` and the raw-buffer
-    string builder; the remainder is mostly Arrow's pooled allocator reusing
-    warm pages, not builder logic.
+  - **At parity** on single-threaded *construction*: array build ~0.94× and
+    string build ~0.85× after zero-copy `finish()`, uninitialised data buffers,
+    and a reusable buffer pool. OdinArrow no longer materially trails Arrow C++
+    on any benchmark here.
 - The honest summary matches the plan's stated goal: a zero-overhead systems
   language **matches or beats a Python-wrapped C++ library**, with much simpler,
   more auditable code — while Arrow C++ still leads on its most tuned hot paths
@@ -123,13 +121,11 @@ reader transparently falls back to a full read.
 
 ## Future work surfaced by these numbers
 
-1. **Pooled/arena allocator for builders** — the remaining ~1.6–1.8× build gap
-   to Arrow C++ is now dominated by Arrow reusing warm pages across builds while
-   OdinArrow faults in fresh pages; a reusable buffer pool would close most of it.
-2. **End-to-end Large\* support** — make the IPC layer i64-offset-aware so
+1. **End-to-end Large\* support** — make the IPC layer i64-offset-aware so
    LargeString/LargeBinary columns round-trip (tracked separately).
 
 _Done since the first run:_
-- _The IPC reader is now memory-mapped — former ~2× IPC-read deficit is now a ~2× roundtrip win._
-- _`finish()` is zero-copy and the string builder uses raw buffers — the array/string
-  build gap to Arrow C++ shrank from ~2.5–3× to ~1.6–1.8×._
+- _The IPC reader is now memory-mapped — former ~2× IPC-read deficit is a ~2× roundtrip win._
+- _`finish()` is zero-copy, builder data buffers are left uninitialised, and a
+  reusable `Buffer_Pool` recycles freed blocks — the array/string build gap to
+  Arrow C++ shrank from ~2.5–3× to ~parity (0.94× / 0.85×)._

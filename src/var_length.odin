@@ -32,13 +32,14 @@ string_builder_make :: proc(initial_cap := 64, allocator := context.allocator) -
 	data_cap := cap * 8
 	off_cap  := cap + 1
 	bm       := bitmap_byte_count(cap)
-	data_raw, _ := mem.alloc(data_cap,              ARROW_ALIGNMENT, allocator)
-	off_raw,  _ := mem.alloc(off_cap * size_of(i32), ARROW_ALIGNMENT, allocator)
-	bm_raw,   _ := mem.alloc(bm,                     ARROW_ALIGNMENT, allocator)
-	mem.zero(bm_raw, bm)
+	// data and offsets are fully written before the array is read → leave
+	// uninitialised; the validity bitmap must start zeroed.
+	data_bytes, _ := mem.alloc_bytes_non_zeroed(data_cap,               ARROW_ALIGNMENT, allocator)
+	off_bytes,  _ := mem.alloc_bytes_non_zeroed(off_cap * size_of(i32), ARROW_ALIGNMENT, allocator)
+	bm_raw,     _ := mem.alloc(bm,                                      ARROW_ALIGNMENT, allocator)
 	b := String_Builder{
-		data      = cast([^]u8)data_raw,  data_cap = data_cap,
-		offsets   = cast([^]i32)off_raw,  off_cap  = off_cap,
+		data      = raw_data(data_bytes),             data_cap = data_cap,
+		offsets   = cast([^]i32)raw_data(off_bytes),  off_cap  = off_cap,
 		bitmap    = cast([^]u8)bm_raw,    bm_cap   = bm,
 		allocator = allocator,
 	}
