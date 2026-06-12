@@ -109,7 +109,29 @@ odin build src -out:libodinarrow       # build the package
 
 To use it in your own project, import the `src` directory as the `odinarrow`
 package. A complete, runnable tour of the API lives in
-[`examples/quickstart`](examples/quickstart/main.odin).
+[`examples/quickstart`](examples/quickstart/main.odin); running it prints:
+
+```
+== OdinArrow quickstart ==
+
+-- primitives + compute --
+  length=10  null_count=1
+  sum=42 (over 9 non-null)  min=0  max=9  mean=4.67
+  even values: [0, 2, 4, 6, 8]
+
+-- strings --
+  4 strings, 17 total bytes; arr[1]="arrow"
+
+-- sort_indices + take --
+  sorted: [10, 20, 30, 40, 50]
+
+-- Arrow IPC file round-trip --
+  wrote /tmp/odinarrow_quickstart.arrow (readable by pyarrow.ipc.open_file)
+  read back 3 row(s):
+    id=1 name="ada"
+    id=2 name="alan"
+    id=3 name="grace"
+```
 
 ## Capabilities
 
