@@ -187,9 +187,8 @@ Files: `types.odin`, `array.odin`, `builders.odin`
 Files: `array.odin` (extended), `builders.odin` (extended)
 
 - [x] String / Binary arrays (i32 offsets buffer)
-- [x] LargeString / LargeBinary (i64 offsets) — builders + zero-copy accessors
-      (NB: the IPC writer still encodes variable-length columns with i32-offset
-      width, so Large* columns should not yet be round-tripped through IPC)
+- [x] LargeString / LargeBinary (i64 offsets) — builders, zero-copy accessors,
+      and full i64-offset-aware IPC round-trip (pyarrow interop verified)
 - [x] String_Builder: append_string, append_null, finish
 
 **Tests**: offset invariants, null strings, unicode content
@@ -227,7 +226,8 @@ Files: `ipc.odin` (self-contained back-to-front FlatBuffers builder)
 - [x] Arrow IPC stream writer/reader (footerless, sequential messages + EOS)
 - [x] Arrow IPC file writer/reader (Feather v2, seekable, random batch access)
 - [x] Cross-validated with PyArrow in both directions (int8/16/32/64,
-      uint, float32/64, utf8, nulls, multiple record batches)
+      uint, float32/64, utf8, large_utf8, binary, large_binary, nulls,
+      multiple record batches)
 - [x] Zero-copy reads: columns are views into the file block (no per-buffer copy)
 
 **Tests**: roundtrip write → read for all array types (tests/test_ipc.odin),

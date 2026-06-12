@@ -119,13 +119,11 @@ reader transparently falls back to a full read.
   more auditable code — while Arrow C++ still leads on its most tuned hot paths
   (builders, mmap'd IO).
 
-## Future work surfaced by these numbers
+## Optimizations applied (since the first run)
 
-1. **End-to-end Large\* support** — make the IPC layer i64-offset-aware so
-   LargeString/LargeBinary columns round-trip (tracked separately).
-
-_Done since the first run:_
-- _The IPC reader is now memory-mapped — former ~2× IPC-read deficit is a ~2× roundtrip win._
+- _The IPC reader is memory-mapped — former ~2× IPC-read deficit is a ~2× roundtrip win._
 - _`finish()` is zero-copy, builder data buffers are left uninitialised, and a
   reusable `Buffer_Pool` recycles freed blocks — the array/string build gap to
   Arrow C++ shrank from ~2.5–3× to ~parity (0.94× / 0.85×)._
+- _The IPC layer is i64-offset-aware, so LargeString/LargeBinary (and Binary)
+  columns round-trip end-to-end, pyarrow-interop verified in both directions._

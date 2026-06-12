@@ -30,6 +30,89 @@ make_string_array :: proc(vals: []string) -> oa.Array {
     return arr
 }
 
+// ── Large* round-trip ─────────────────────────────────────────────────────────
+
+@(test)
+test_ipc_large_string :: proc(t: ^testing.T) {
+    path := "/tmp/test_ipc_large_str.arrow"
+    defer os.remove(path)
+
+    fields := []oa.Field{oa.field_make("ls", oa.Large_String_Type{})}
+    schema, _ := oa.schema_make(fields)
+    defer oa.schema_free(&schema)
+
+    // a null and an empty exercise validity + repeated i64 offsets
+    b := oa.large_string_builder_make(4)
+    oa.large_string_builder_append(&b, "alpha")
+    oa.large_string_builder_append_null(&b)
+    oa.large_string_builder_append(&b, "")
+    oa.large_string_builder_append(&b, "gamma")
+    col, _ := oa.large_string_builder_finish(&b)
+    oa.large_string_builder_destroy(&b)
+
+    batch, _ := oa.record_batch_make(&schema, []oa.Array{col})
+    defer oa.record_batch_free(&batch)
+
+    testing.expect(t, oa.ipc_write_file(path, &schema, []oa.Record_Batch{batch}))
+
+    schema2, batches, ok := oa.ipc_read_file(path)
+    testing.expect(t, ok)
+    defer {
+        oa.schema_free(schema2); free(schema2)
+        for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+        delete(batches)
+    }
+
+    testing.expect_value(t, len(batches), 1)
+    _, is_large := schema2.fields[0].type.(oa.Large_String_Type)
+    testing.expect(t, is_large, "type should round-trip as Large_String_Type")
+    c := oa.record_batch_column_at(&batches[0], 0)
+    testing.expect_value(t, oa.array_get_large_string(c, 0), "alpha")
+    testing.expect(t, oa.array_is_null(c, 1))
+    testing.expect_value(t, oa.array_get_large_string(c, 2), "")
+    testing.expect_value(t, oa.array_get_large_string(c, 3), "gamma")
+}
+
+@(test)
+test_ipc_binary :: proc(t: ^testing.T) {
+    path := "/tmp/test_ipc_binary.arrow"
+    defer os.remove(path)
+
+    fields := []oa.Field{oa.field_make("bin", oa.Binary_Type{})}
+    schema, _ := oa.schema_make(fields)
+    defer oa.schema_free(&schema)
+
+    b := oa.binary_builder_make(3)
+    oa.binary_builder_append(&b, []u8{0x00, 0xFF})
+    oa.binary_builder_append(&b, []u8{0x42})
+    col, _ := oa.binary_builder_finish(&b)
+    oa.binary_builder_destroy(&b)
+
+    batch, _ := oa.record_batch_make(&schema, []oa.Array{col})
+    defer oa.record_batch_free(&batch)
+
+    testing.expect(t, oa.ipc_write_file(path, &schema, []oa.Record_Batch{batch}))
+
+    schema2, batches, ok := oa.ipc_read_file(path)
+    testing.expect(t, ok)
+    defer {
+        oa.schema_free(schema2); free(schema2)
+        for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+        delete(batches)
+    }
+
+    _, is_bin := schema2.fields[0].type.(oa.Binary_Type)
+    testing.expect(t, is_bin, "type should round-trip as Binary_Type")
+    c := oa.record_batch_column_at(&batches[0], 0)
+    v0 := oa.array_get_binary(c, 0)
+    testing.expect_value(t, len(v0), 2)
+    testing.expect_value(t, v0[0], u8(0x00))
+    testing.expect_value(t, v0[1], u8(0xFF))
+    v1 := oa.array_get_binary(c, 1)
+    testing.expect_value(t, len(v1), 1)
+    testing.expect_value(t, v1[0], u8(0x42))
+}
+
 // ── IPC round-trip ────────────────────────────────────────────────────────────
 
 @(test)

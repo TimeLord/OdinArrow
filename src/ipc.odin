@@ -236,13 +236,15 @@ _le_i32 :: #force_inline proc(dst: []u8, v: i32) {
 // ── Arrow type encoding ───────────────────────────────────────────────────────
 
 // Arrow IPC Type enum (format/Schema.fbs): None=0, Null=1, Int=2, FloatingPoint=3,
-// Binary=4, Utf8=5, Bool=6, ..., LargeUtf8=20
-_IPC_TYPE_NONE       :: u8(0)
-_IPC_TYPE_INT        :: u8(2)
-_IPC_TYPE_FLOATINGPT :: u8(3)
-_IPC_TYPE_UTF8       :: u8(5)
-_IPC_TYPE_BOOL       :: u8(6)
-_IPC_TYPE_LARGEUTF8  :: u8(20)
+// Binary=4, Utf8=5, Bool=6, ..., LargeBinary=19, LargeUtf8=20
+_IPC_TYPE_NONE        :: u8(0)
+_IPC_TYPE_INT         :: u8(2)
+_IPC_TYPE_FLOATINGPT  :: u8(3)
+_IPC_TYPE_BINARY      :: u8(4)
+_IPC_TYPE_UTF8        :: u8(5)
+_IPC_TYPE_BOOL        :: u8(6)
+_IPC_TYPE_LARGEBINARY :: u8(19)
+_IPC_TYPE_LARGEUTF8   :: u8(20)
 
 // MetadataVersion (V4=4 and V5=5 are both widely supported; use V5)
 _IPC_VERSION :: i16(4)  // MetadataVersion.V5 = enum value 4
@@ -264,6 +266,8 @@ _ipc_write_type :: proc(b: ^FBB, dt: DataType) -> (disc: u8, off: int) {
     case Bool_Type:         return _IPC_TYPE_BOOL, _ipc_empty_type(b)
     case String_Type:       return _IPC_TYPE_UTF8, _ipc_empty_type(b)
     case Large_String_Type: return _IPC_TYPE_LARGEUTF8, _ipc_empty_type(b)
+    case Binary_Type:       return _IPC_TYPE_BINARY, _ipc_empty_type(b)
+    case Large_Binary_Type: return _IPC_TYPE_LARGEBINARY, _ipc_empty_type(b)
     case Int8_Type:   return _ipc_int_type(b, 8, true)
     case Int16_Type:  return _ipc_int_type(b, 16, true)
     case Int32_Type:  return _ipc_int_type(b, 32, true)
@@ -274,7 +278,7 @@ _ipc_write_type :: proc(b: ^FBB, dt: DataType) -> (disc: u8, off: int) {
     case UInt64_Type: return _ipc_int_type(b, 64, false)
     case Float32_Type: return _ipc_fp_type(b, 1)  // precision SINGLE
     case Float64_Type: return _ipc_fp_type(b, 2)  // precision DOUBLE
-    case Null_Type, Binary_Type, Large_Binary_Type:
+    case Null_Type:
         return _IPC_TYPE_NONE, 0
     }
     return _IPC_TYPE_NONE, 0
@@ -399,17 +403,34 @@ _ipc_encode_record_batch :: proc(
         _align_i64(&running_off, 8)
 
         switch _ in col.type {
-        case String_Type, Large_String_Type, Binary_Type, Large_Binary_Type:
-            // offsets buffer
+        case String_Type, Binary_Type:
+            // i32 offsets buffer
             off_len := i64((col.length + 1) * size_of(i32))
             append(&buf_offsets, running_off)
             append(&buf_lengths, off_len)
             append(body_descs, IPC_Body_Buffer{col.buffers[1].data, off_len})
             running_off += off_len
             _align_i64(&running_off, 8)
-            // values buffer
+            // values buffer (data length = last offset)
             offsets_ptr := cast([^]i32)col.buffers[1].data
             data_len := i64(offsets_ptr[col.length + col.offset])
+            append(&buf_offsets, running_off)
+            append(&buf_lengths, data_len)
+            append(body_descs, IPC_Body_Buffer{col.buffers[2].data, data_len})
+            running_off += data_len
+            _align_i64(&running_off, 8)
+            n_buffers += 3
+        case Large_String_Type, Large_Binary_Type:
+            // i64 offsets buffer
+            off_len := i64((col.length + 1) * size_of(i64))
+            append(&buf_offsets, running_off)
+            append(&buf_lengths, off_len)
+            append(body_descs, IPC_Body_Buffer{col.buffers[1].data, off_len})
+            running_off += off_len
+            _align_i64(&running_off, 8)
+            // values buffer (data length = last offset)
+            offsets_ptr := cast([^]i64)col.buffers[1].data
+            data_len := offsets_ptr[col.length + col.offset]
             append(&buf_offsets, running_off)
             append(&buf_lengths, data_len)
             append(body_descs, IPC_Body_Buffer{col.buffers[2].data, data_len})
@@ -989,9 +1010,11 @@ _ipc_read_field :: proc(data: []u8, tbl: int, allocator: mem.Allocator) -> Field
 
 _ipc_disc_to_datatype :: proc(data: []u8, disc: u8, tbl: int) -> DataType {
     switch disc {
-    case _IPC_TYPE_BOOL:     return Bool_Type{}
-    case _IPC_TYPE_UTF8:     return String_Type{}
-    case _IPC_TYPE_LARGEUTF8: return Large_String_Type{}
+    case _IPC_TYPE_BOOL:        return Bool_Type{}
+    case _IPC_TYPE_UTF8:        return String_Type{}
+    case _IPC_TYPE_LARGEUTF8:   return Large_String_Type{}
+    case _IPC_TYPE_BINARY:      return Binary_Type{}
+    case _IPC_TYPE_LARGEBINARY: return Large_Binary_Type{}
     case _IPC_TYPE_INT:
         if tbl > 0 && tbl+4 <= len(data) {
             soff := _rd_i32(data, tbl)
@@ -1126,7 +1149,11 @@ _ipc_decode_record_batch :: proc(
 
             switch _ in dt {
             case String_Type, Large_String_Type, Binary_Type, Large_Binary_Type:
-                off_len := (col_len + 1) * size_of(i32)
+                off_w := size_of(i32)
+                #partial switch _ in dt {
+                case Large_String_Type, Large_Binary_Type: off_w = size_of(i64)
+                }
+                off_len := (col_len + 1) * off_w
                 off_buf: Buffer
                 if buf_idx < n_bufs {
                     off_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), off_len)
