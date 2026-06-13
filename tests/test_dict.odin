@@ -84,3 +84,40 @@ test_dict_group_sum :: proc(t: ^testing.T) {
 		if name == "b" { testing.expect(t, approx_eq(sums[ci], 2+5, 1e-9)) }    // 7
 	}
 }
+
+@(test)
+test_dict_numeric :: proc(t: ^testing.T) {
+	// logical: 5,2,5,9,2,5,9  → dict {5,2,9}, codes by first-seen
+	vb := oa.builder_make(f64, 7)
+	defer oa.builder_destroy(&vb)
+	vals := []f64{5, 2, 5, 9, 2, 5, 9}
+	for v in vals { oa.builder_append(&vb, v) }
+	src, _ := oa.builder_finish(&vb)
+	defer oa.array_free(&src)
+
+	d := oa.dict_encode(&src, f64)
+	defer oa.dict_free(&d)
+	testing.expect_value(t, d.length, 7)
+	testing.expect_value(t, oa.dict_size(&d), 3)
+
+	for v, i in vals { testing.expect(t, approx_eq(oa.dict_get(&d, i), v, 1e-9)) }
+
+	// sum / min_max via the encoded kernels
+	testing.expect(t, approx_eq(oa.dict_sum(&d), 5+2+5+9+2+5+9, 1e-9))
+	lo, hi, ok := oa.dict_min_max(&d)
+	testing.expect(t, ok)
+	testing.expect(t, approx_eq(lo, 2, 1e-9))
+	testing.expect(t, approx_eq(hi, 9, 1e-9))
+
+	// value_counts: 5×3, 2×2, 9×2
+	counts := oa.dict_value_counts(&d)
+	defer delete(counts)
+	total := i64(0)
+	for c in counts { total += c }
+	testing.expect_value(t, total, i64(7))
+
+	// decode round-trip
+	dec, _ := oa.dict_decode(&d)
+	defer oa.array_free(&dec)
+	for v, i in vals { testing.expect(t, approx_eq(oa.array_get(&dec, i, f64), v, 1e-9)) }
+}
