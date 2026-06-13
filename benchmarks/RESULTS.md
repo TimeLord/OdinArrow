@@ -245,3 +245,19 @@ and summing 2 of the columns:
 **3.3×** — the selection skips copying the two unused columns and the whole
 record-batch allocation. (For a *single* filter→aggregate the two are a wash;
 the win is multi-column / multi-step, which is the realistic query shape.)
+
+**Chained predicates.** `compute_select_compare` + `selection_refine_compare`
+short-circuit a conjunctive (AND) query: each successive predicate is evaluated
+only on the rows that survived the previous one, and the final aggregate gathers
+only the survivors — no array is materialised between predicates. `WHERE
+c0..c3 > 50 → SUM(pay)` on 10M rows:
+
+| #predicates | materialise between | chained selection |
+|---|---:|---:|
+| 2 | 33.3 ms | 33.1 ms (≈1×) |
+| 4 | 200.8 ms | **89.5 ms (2.24×)** |
+
+The win **grows with the number of conjuncts**: at 2 predicates the first 10M
+column scan dominates (a wash; PyArrow's SIMD compares are actually faster here),
+but each added predicate makes the materialise-between path re-copy every carried
+column while the selection just shrinks an index list.

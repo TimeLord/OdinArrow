@@ -207,8 +207,17 @@ materialising the whole filtered batch first (**3.3×**). As predicted, the win 
 multi-column: the selection never copies the 2 unused columns or allocates a
 batch. (A single filter→aggregate is a wash — that case is better served by C3.)
 
-*Still open:* selection-aware min/max/take for all types, combining selections
-(chained predicates), and a SIMD compress for `compute_select` itself.
+**Chained predicates — ✅ done** (`compare.odin`): `compute_compare`,
+`compute_select_compare` (first predicate → selection, single pass) and
+`selection_refine_compare` (AND another predicate, evaluated only at the
+surviving rows). `WHERE c0..c3 > 50 SUM(pay)` on 10M: **2.24×** (89.5 vs
+200.8 ms) at 4 predicates — but a *2-predicate* query is a wash (first 10M scan
+dominates, and PyArrow's SIMD compares are faster there). The win **grows with
+the number of conjuncts**, since materialise-between re-copies every carried
+column per predicate while the selection just shrinks an index list.
+
+*Still open:* SIMD compares (PyArrow beats us per-predicate over N), selection-
+aware min/max/take for all types, and a SIMD compress for `compute_select`.
 
 ### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
 Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and
