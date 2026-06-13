@@ -94,6 +94,44 @@ _sum_selection_typed :: #force_inline proc(arr: ^Array, sel: ^Selection, $T: typ
 	return
 }
 
+// Number of selected rows.
+compute_count_selection :: proc(sel: ^Selection) -> int { return sel.length }
+
+compute_min_max_selection :: proc(arr: ^Array, sel: ^Selection) -> (min_val: f64, max_val: f64, valid_count: int) {
+	switch _ in arr.type {
+	case Int8_Type:    return _min_max_selection_typed(arr, sel, i8)
+	case Int16_Type:   return _min_max_selection_typed(arr, sel, i16)
+	case Int32_Type:   return _min_max_selection_typed(arr, sel, i32)
+	case Int64_Type:   return _min_max_selection_typed(arr, sel, i64)
+	case UInt8_Type:   return _min_max_selection_typed(arr, sel, u8)
+	case UInt16_Type:  return _min_max_selection_typed(arr, sel, u16)
+	case UInt32_Type:  return _min_max_selection_typed(arr, sel, u32)
+	case UInt64_Type:  return _min_max_selection_typed(arr, sel, u64)
+	case Float32_Type: return _min_max_selection_typed(arr, sel, f32)
+	case Float64_Type: return _min_max_selection_typed(arr, sel, f64)
+	case Null_Type, Bool_Type, String_Type, Large_String_Type, Binary_Type, Large_Binary_Type:
+		panic("compute_min_max_selection: type does not support ordering")
+	}
+	return
+}
+
+_min_max_selection_typed :: #force_inline proc(arr: ^Array, sel: ^Selection, $T: typeid) -> (min_val: f64, max_val: f64, valid_count: int) {
+	data := cast([^]T)arr.buffers[1].data
+	off  := arr.offset
+	has_nulls := arr.buffers[0].data != nil
+	lo, hi: T
+	seen := false
+	for j in 0..<sel.length {
+		i := int(sel.indices[j])
+		if has_nulls && !array_is_valid(arr, i) { continue }
+		v := data[off + i]
+		if seen { if v < lo { lo = v }; if v > hi { hi = v } } else { lo = v; hi = v; seen = true }
+		valid_count += 1
+	}
+	if seen { min_val = f64(lo); max_val = f64(hi) }
+	return
+}
+
 // ── materialise (the escape hatch: gather one column at the selected rows) ──
 
 selection_take :: proc(arr: ^Array, sel: ^Selection, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {

@@ -90,3 +90,35 @@ test_sum_where_fused :: proc(t: ^testing.T) {
 	fsum, _ := oa.compute_sum(&filtered)
 	testing.expect(t, approx_eq(sum, fsum, 1e-9))
 }
+
+@(test)
+test_fused_min_max_mean_where :: proc(t: ^testing.T) {
+	vals := sel_f64([]f64{5, 1, 8, 3, 9, 2, 7, 4})
+	defer oa.array_free(&vals)
+	// keep idx 0,2,4,6 → 5,8,9,7
+	mvals := []bool{true, false, true, false, true, false, true, false}
+	mask := build_bool_mask(mvals)
+	defer oa.array_free(&mask)
+
+	lo, hi, vc := oa.compute_min_max_where(&vals, &mask)
+	testing.expect_value(t, vc, 4)
+	testing.expect(t, approx_eq(lo, 5, 1e-9))
+	testing.expect(t, approx_eq(hi, 9, 1e-9))
+
+	mn, _ := oa.compute_min_where(&vals, &mask)
+	mx, _ := oa.compute_max_where(&vals, &mask)
+	testing.expect(t, approx_eq(mn, 5, 1e-9))
+	testing.expect(t, approx_eq(mx, 9, 1e-9))
+
+	mean, _ := oa.compute_mean_where(&vals, &mask)
+	testing.expect(t, approx_eq(mean, (5.0+8+9+7)/4, 1e-9))
+
+	// selection-aware min/max must agree with the fused version
+	sel := oa.compute_select(&mask)
+	defer oa.selection_free(&sel)
+	slo, shi, svc := oa.compute_min_max_selection(&vals, &sel)
+	testing.expect_value(t, svc, 4)
+	testing.expect(t, approx_eq(slo, 5, 1e-9))
+	testing.expect(t, approx_eq(shi, 9, 1e-9))
+	testing.expect_value(t, oa.compute_count_selection(&sel), 4)
+}
