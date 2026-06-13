@@ -178,15 +178,22 @@ These break the Arrow in-memory/wire contract, so they'd live behind a
 conversion boundary (convert to/from Arrow at IPC edges) — but they're how
 DuckDB / Velox / Umbra beat textbook Arrow kernels.
 
-### C1. German-style ("Umbra") short-string inlining — *very high*
-Replace the `[offsets:i32][bytes:u8]` Utf8 layout with a 16-byte-per-string
-struct: `{ len:u32, prefix:[4]u8, ptr_or_inline:… }`. Strings ≤12 bytes live
-**entirely inline** (no offset indirection, no second buffer, no pointer chase);
-longer ones keep a prefix for fast comparison plus a pointer. This collapses the
-two cache misses per element (offset, then bytes) into one sequential stream and
-makes equality/`<`/prefix-filter checks branch-light. String-heavy workloads
-(scan, filter, sort, join keys) improve dramatically. Cost: not Arrow-layout, so
-IPC read/write must transcode.
+### C1. German-style ("Umbra") short-string inlining — ✅ *done*
+Implemented (`umbra.odin`): a 16-byte slot `{ length:u32, data:[12]u8 }` —
+inline for length ≤ 12, 4-byte prefix + side-buffer offset otherwise — with a
+builder, zero-copy accessor, a prefix-fast-path `umbra_compare`, `umbra_count_eq`,
+and `umbra_sort_indices`. The prefix lives in the slot, so comparisons resolve in
+registers without chasing into the data buffer.
+
+**Measured:** sorting 1M ~20-char strings — Umbra **272 ms** vs OdinArrow's
+Arrow-layout sort **518 ms (1.9×)** and PyArrow's `pc.sort_indices` **415 ms
+(1.5×)**, identical ordering. Cost: ~30% more memory (fixed 16-byte slots). A
+smaller-but-real win than C4 because the data access during a sort, while
+random, still hits a warm-ish buffer; the prefix mainly saves the compare itself.
+
+*Still open under C1:* SIMD/bulk equality + range filters over the prefix
+column, join-key hashing on the inline bytes, and a transcoder to/from Arrow Utf8
+at the IPC boundary.
 
 ### C2. Selection vectors instead of materialising filter/take — *very high (deferred)*
 `compute_filter`/`compute_take` currently allocate and copy a new contiguous
@@ -255,12 +262,12 @@ than DRAM-bound:
    purely bandwidth-bound (branchy / scatter-gather), so vectorising them should
    pay off where the reductions didn't.
 3. **C-items** — the structural changes that cut memory traffic and move
-   OdinArrow from "matches Arrow C++" to "beats it." ✅ **C4 (run-end encoding)**
-   done — 385–510× on runny data, something PyArrow can't do. Remaining, in
-   increasing effort: **C4-dictionary** (group-by on codes), **C1** (Umbra
-   strings), then **C2 + C3** together (selection vectors + fusion, which need
-   record-batch-level filtering). These attack the bottleneck every experiment
-   surfaced: bytes moved, not vector width.
+   OdinArrow from "matches Arrow C++" to "beats it."
+   - ✅ **C4 (run-end encoding)** — 385–510× on runny data; PyArrow can't do it.
+   - ✅ **C1 (Umbra strings)** — 1.9× on string sort vs the Arrow layout.
+   - Remaining: **C4-dictionary** (group-by on codes), then **C2 + C3** together
+     (selection vectors + fusion, which need record-batch-level filtering).
+   These attack the bottleneck every experiment surfaced: bytes moved, not width.
 4. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
    `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.

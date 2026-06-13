@@ -171,3 +171,25 @@ PyArrow's, on **667× less memory** — and **PyArrow cannot do it at all**: its
 means decoding back to 78 MB first. This is a compatibility-breaking layout (kept
 as a separate `RLE_Array(T)` type, not in the Arrow `Array` union), and it is the
 first piece of the "move fewer bytes" roadmap (Endeavor C4).
+
+## Umbra short strings — comparison without the pointer chase (Endeavor C1)
+
+Arrow's `[offsets:i32][bytes:u8]` Utf8 layout takes a cache miss into the data
+buffer on **every** string comparison. Umbra ("German") strings store each
+element in a fixed 16-byte slot — `{ length:u32, data:[12]u8 }` — with the bytes
+inline for length ≤ 12 and a 4-byte **prefix** + side-buffer offset otherwise.
+The prefix lives in the slot, so most comparisons resolve in registers without
+touching the data buffer at all.
+
+Sorting 1M random ~20-char strings (`sort_indices`):
+
+| | time |
+|---|---:|
+| OdinArrow Arrow-layout sort | 518 ms |
+| PyArrow `pc.sort_indices`   | 415 ms |
+| **OdinArrow Umbra sort**    | **272 ms** |
+
+**1.9× faster** than OdinArrow's own Arrow-layout sort and **1.5× faster** than
+PyArrow, with identical ordering. The cost is ~30% more memory (fixed 16-byte
+slots vs `offsets + bytes`) — the classic Umbra trade. Kept as a separate
+`Umbra_Array` type, transcoded at an Arrow/IPC boundary.
