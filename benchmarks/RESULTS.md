@@ -30,7 +30,8 @@ apples-to-apples.
 | Benchmark | Threading | OdinArrow (ms) | PyArrow (ms) | Arrow C++ (ms) | Py/Odin | C++/Odin |
 |---|---|---:|---:|---:|---:|---:|
 | Build 10M i32 (1% nulls) | all single | 44.20 | 957.49 | 41.69 | 21.66× | 0.94× |
-| Sum 10M f64 | Odin MT | 3.49 | 6.20 | 6.08 | 1.77× | 1.74× |
+| Sum 10M f64 | Odin MT | 3.18 | 6.81 | 6.01 | 2.14× | 1.89× |
+| Sum 10M f64 (1% nulls) | Odin MT | 3.48 | 8.25 | 8.54 | 2.37× | 2.45× |
 | Sum 10M i32 | Odin MT | 2.05 | 2.45 | 2.47 | 1.20× | 1.20× |
 | Min+Max 10M i32 | Odin MT | 2.01 | 4.07 | 2.23 | 2.03× | 1.11× |
 | Filter 10M i32 (50% pass) | Odin MT | 13.16 | 36.13 | 39.52 | 2.75× | 3.00× |
@@ -60,6 +61,23 @@ realistic threading ceiling is ~4× before memory bandwidth saturates; sum is
 memory-bound, so the observed ~2× over single-threaded C++ is bandwidth-limited
 rather than compute-limited. Per-core, OdinArrow's SIMD sum is roughly on par
 with Arrow C++.
+
+### Sum f64 with 1% nulls (Odin 2.4× C++, threaded) — the null-aware path
+The headline number is threaded, but the more telling figure is the **null
+overhead**: OdinArrow's sum goes from 3.18 → 3.48 ms when 1% of values are null
+(**+9%**), whereas Arrow C++ goes 6.01 → 8.54 ms (**+42%**) and PyArrow 6.81 →
+8.25 ms (+21%). OdinArrow handles nulls almost for free because the kernel walks
+the validity bitmap a **byte at a time**: an all-valid byte (`0xFF`) means "8
+valid in a row," coalesced into a run and summed with the SIMD kernel; all-null
+bytes are skipped; only mixed bytes are bit-tested. The previous code did a
+per-element `is_valid` branch.
+
+At 10M (DRAM-bound) the branch was partly hidden behind memory latency, so the
+end-to-end win there is ~13%. The real payoff is in the **compute-bound /
+cache-resident** regime, where the branch isn't masked: summing a 1.6 MB null
+array in a tight loop went from **245 µs → 75 µs per call (3.3×)**, same result.
+This is the B1 lesson in reverse — once a kernel is not bandwidth-limited,
+removing per-element branching matters a lot.
 
 ### Min+Max — 10M i32 (Odin 1.4× C++, threaded)
 Single-pass combined min+max, SIMD + threaded. The smaller margin over C++ vs
@@ -127,3 +145,6 @@ reader transparently falls back to a full read.
   Arrow C++ shrank from ~2.5–3× to ~parity (0.94× / 0.85×)._
 - _The IPC layer is i64-offset-aware, so LargeString/LargeBinary (and Binary)
   columns round-trip end-to-end, pyarrow-interop verified in both directions._
+- _Null-aware bulk aggregation (sum/min/max) coalesces all-valid validity bytes
+  into SIMD runs instead of branching per element — null overhead drops to ~+9%
+  (vs Arrow C++'s +42%), and cache-resident null-sum is 3.3× faster than before._

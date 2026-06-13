@@ -109,13 +109,28 @@ demonstrably not bandwidth-limited. The i32-sum AVX2 regression should be fixed
 (rewrite `_sum_i32_simd` with explicit `#simd` widening) before any dispatch so
 the wide path is never slower than the narrow one.
 
-### B2. Null-aware bulk aggregation — *high*
-The null path of `_sum_typed`/`_min_typed`/`_max_typed` is a per-element
-`array_is_valid` branch (`compute.odin:42-49`). For arrays with nulls this loses
-all SIMD and mispredicts constantly. Process the validity bitmap a **word at a
-time**: a `0xFFFF…` word means "next 64 valid" → run the SIMD kernel on that
-block with no per-element check; only mixed words fall back to scalar. Arrow's
-kernels do exactly this; today OdinArrow only fast-paths the *no-bitmap* case.
+### B2. Null-aware bulk aggregation — ✅ *done*
+~~The null path of `_sum_typed`/`_min_typed`/`_max_typed` is a per-element
+`array_is_valid` branch.~~ Implemented: the null path now walks the validity
+bitmap a **byte at a time** — an all-valid byte (`0xFF`) is coalesced into a run
+and reduced with the SIMD kernel; all-null bytes are skipped; only mixed bytes
+fall back to bit testing (`_sum_run`/`_min_run`/`_max_run`/`_min_max_run` in
+`compute.odin`). Parallel chunk boundaries are rounded to multiples of 8 so the
+bulk path (which needs `offset % 8 == 0`) stays active inside every worker.
+
+**Measured (i7-7700HQ):**
+- Null overhead on the 10M f64 sum dropped to **+9%** (3.18 → 3.48 ms) vs Arrow
+  C++'s **+42%** (6.01 → 8.54 ms) and PyArrow's +21% — so the threaded null-sum
+  is ~2.4× faster than both.
+- **Cache-resident** null-sum (1.6 MB, tight loop): **245 µs → 75 µs/call (3.3×)**.
+
+The end-to-end gain at 10M is "only" ~13% because that case is DRAM-bound (the
+B1 lesson); the 3.3× shows up once the data fits in cache and the per-element
+branch is no longer hidden behind memory latency. **Next:** extend the same
+byte-coalescing to `compute_mean` is automatic (it calls sum), but the *mask*
+kernels (filter/take) still branch per element — see B4. A future refinement is
+moving from byte (8-wide) to `u64` word (64-wide) coalescing for even longer
+all-valid runs.
 
 ### B3. Widen SIMD coverage — *medium*
 Only `f64` and `i32` have hand-written SIMD; `f32`, `i64`, `i16`, and the
@@ -199,20 +214,23 @@ IPC as the interchange format; use the native one for OdinArrow-to-OdinArrow.
 
 ## Suggested ordering
 
-Updated after the B1 measurement showed large-array aggregation is
-bandwidth-bound (so SIMD width is not the lever — memory traffic is):
+Updated after the B1 and B2 measurements. B1 showed large-array aggregation is
+bandwidth-bound (SIMD width is not the lever); B2 confirmed the flip side —
+removing per-element work is a 3.3× win once a kernel is cache-resident rather
+than DRAM-bound:
 
+- ✅ **B2** (null-aware aggregation) — done; +9% null overhead, 3.3× in-cache.
 1. **A1–A4** (reader hardening behind a `trusted` flag) — correctness/safety
    before any of this is pointed at real files.
-2. **B2, B5** (null-aware aggregation, persistent thread pool) — big, compatible;
-   B2 also removes a memory pass, which is what actually helps here.
+2. **B5** (persistent thread pool) — compatible; removes ~50 µs/call spawn cost
+   and makes small/medium parallel calls worthwhile.
 3. **B4** (SIMD filter/take), **B3** (wider SIMD coverage) — filter/take are not
    purely bandwidth-bound (branchy / scatter-gather), so vectorising them should
    pay off where the reductions didn't.
 4. **C2 → C4 → C1 → C3** — the structural changes that cut memory traffic and
    move OdinArrow from "matches Arrow C++" to "beats it," in increasing effort.
    These (selection vectors, encoding-aware kernels, fusion) attack the actual
-   bottleneck the B1 experiment surfaced: bytes moved, not vector width.
+   bottleneck the experiments surfaced: bytes moved, not vector width.
 5. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
    `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.
