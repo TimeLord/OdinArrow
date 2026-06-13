@@ -188,13 +188,19 @@ makes equality/`<`/prefix-filter checks branch-light. String-heavy workloads
 (scan, filter, sort, join keys) improve dramatically. Cost: not Arrow-layout, so
 IPC read/write must transcode.
 
-### C2. Selection vectors instead of materialising filter/take — *very high*
+### C2. Selection vectors instead of materialising filter/take — *very high (deferred)*
 `compute_filter`/`compute_take` currently allocate and copy a new contiguous
 array. A vectorised engine instead returns a **selection vector** (a list of
-surviving indices, or a retained validity mask) and defers materialisation,
-letting later kernels operate through the selection. A filter that keeps 5% of
-rows then does almost no copying. Breaks the "kernel returns a dense Array"
-contract — needs a `Selection` type and selection-aware kernels.
+surviving indices) and defers materialisation, letting later kernels operate
+through the selection. Breaks the "kernel returns a dense Array" contract.
+
+*Sequencing note:* for a **single** filter→aggregate, a selection vector is
+roughly a wash (it still scans the mask and touches the surviving rows, just via
+indices instead of a copy). Its real win needs **multi-column tables** (filter
+once, gather only the columns/rows you actually use) or **chained operations**
+(combine selections without materialising between) — i.e. record-batch-level
+filtering, which doesn't exist yet. So C4 (which wins on a single column) was
+done first; C2 is best built alongside the table/group-by work.
 
 ### C3. Operator fusion / data-centric compilation — *very high, hard*
 Today `filter(...)` then `sum(...)` materialises the filtered array in between.
@@ -202,11 +208,21 @@ Fusing the pipeline (`sum_where(values, mask)`) — or generating fused code per
 query — removes the intermediate buffer and a full extra pass over memory. The
 largest available win and the hardest; the natural endpoint once B/C2 exist.
 
-### C4. Encoding-aware kernels (dictionary / RLE) — *high*
-Store low-cardinality columns dictionary-encoded and run aggregates/group-bys on
-the **codes** (e.g. sum over RLE runs, group-by on dictionary indices) without
-decoding. Arrow has dictionary *arrays* but OdinArrow's kernels don't exploit
-them; making the kernels first-class encoding-aware is where the speedups are.
+### C4. Encoding-aware kernels (dictionary / RLE) — ✅ *run-end encoding done*
+Run aggregates over the **encoded** form instead of decoding first. Implemented
+(`rle.odin`): `RLE_Array(T)` (run_ends + per-run values), a coalescing builder,
+`rle_encode`/`rle_decode`, and `rle_sum`/`rle_min_max` that run in **O(runs)**.
+
+**Measured (10M f64, 10K runs, single-thread):** `rle_sum` 11.8 µs vs OdinArrow's
+plain sum 4541 µs (**385×**) and PyArrow's `pc.sum` 6045 µs (**510×**), on
+**667× less memory** (117 KB vs 78 MB). PyArrow has **no** REE sum kernel at all
+(`pc.sum` rejects `run_end_encoded`), so this is something the reference cannot
+do — the clearest "superior to the original" win so far, and a direct payoff of
+the move-fewer-bytes thesis.
+
+*Still open under C4:* dictionary encoding (group-by on codes), REE with nulls
+(run-level validity), and threading the encoded kernels (rarely needed — O(runs)
+is already tiny).
 
 ### C5. Drop the optional validity bitmap for declared non-null columns — *medium*
 Arrow always allows a validity buffer. A type-system flag for "non-nullable"
@@ -238,10 +254,13 @@ than DRAM-bound:
 2. **B4** (SIMD filter/take), **B3** (wider SIMD coverage) — filter/take are not
    purely bandwidth-bound (branchy / scatter-gather), so vectorising them should
    pay off where the reductions didn't.
-3. **C2 → C4 → C1 → C3** — the structural changes that cut memory traffic and
-   move OdinArrow from "matches Arrow C++" to "beats it," in increasing effort.
-   These (selection vectors, encoding-aware kernels, fusion) attack the actual
-   bottleneck the experiments surfaced: bytes moved, not vector width.
+3. **C-items** — the structural changes that cut memory traffic and move
+   OdinArrow from "matches Arrow C++" to "beats it." ✅ **C4 (run-end encoding)**
+   done — 385–510× on runny data, something PyArrow can't do. Remaining, in
+   increasing effort: **C4-dictionary** (group-by on codes), **C1** (Umbra
+   strings), then **C2 + C3** together (selection vectors + fusion, which need
+   record-batch-level filtering). These attack the bottleneck every experiment
+   surfaced: bytes moved, not vector width.
 4. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
    `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.

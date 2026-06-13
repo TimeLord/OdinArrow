@@ -148,3 +148,26 @@ reader transparently falls back to a full read.
 - _Null-aware bulk aggregation (sum/min/max) coalesces all-valid validity bytes
   into SIMD runs instead of branching per element — null overhead drops to ~+9%
   (vs Arrow C++'s +42%), and cache-resident null-sum is 3.3× faster than before._
+
+## Encoding-aware kernels — run-end encoding (beyond Arrow's plain layout)
+
+The aggregation experiments (B1/B2/B5) all converged on one lesson: the headline
+kernels are **memory-bound**, so the durable win is moving fewer bytes. Run-end
+encoding does exactly that — it stores a column of `length` elements as `k` runs
+(`run_ends` + per-run `values`) and aggregates over the runs, never touching the
+elements the encoding collapsed.
+
+10M-element f64 column with 1000-long runs (10K runs), single-threaded:
+
+| | time | size |
+|---|---:|---:|
+| Plain `compute_sum` (OdinArrow) | 4541 µs | 78 MB |
+| Plain `pc.sum` (PyArrow)        | 6045 µs | 78 MB |
+| **`rle_sum` (OdinArrow)**       | **11.8 µs** | **117 KB** |
+
+That is **~385× faster** than OdinArrow's own plain sum and **~510× faster** than
+PyArrow's, on **667× less memory** — and **PyArrow cannot do it at all**: its
+`pc.sum` has no kernel for `run_end_encoded` input, so summing an REE column there
+means decoding back to 78 MB first. This is a compatibility-breaking layout (kept
+as a separate `RLE_Array(T)` type, not in the Arrow `Array` union), and it is the
+first piece of the "move fewer bytes" roadmap (Endeavor C4).
