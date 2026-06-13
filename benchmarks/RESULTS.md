@@ -213,3 +213,35 @@ PyArrow's own dictionary `value_counts`. Encoding the column is a one-time 196 m
 (amortised — columns commonly arrive dictionary-encoded from storage, e.g.
 Parquet). `str_dict_group_sum` extends the same idea to grouped aggregation (sum
 a second column bucketed by code).
+
+## Fusion + selection vectors — don't materialise (Endeavor C3 + C2)
+
+The most direct application of "move fewer bytes": don't build the intermediate
+filtered array at all.
+
+**C3 — operator fusion.** `compute_sum_where(values, mask)` does filter+sum in a
+single pass with no allocation, replacing `filter(values, mask)` then `sum(...)`.
+10M f64, 50% mask:
+
+| | time |
+|---|---:|
+| OdinArrow `filter` then `sum` | 34.2 ms |
+| PyArrow `sum(filter(...))`    | 41.6 ms |
+| **OdinArrow `sum_where`**     | **7.6 ms** |
+
+**4.5×** over OdinArrow's own filter+sum and **5.5×** over PyArrow — the
+intermediate array's allocation, dense copy, and re-read are all gone.
+
+**C2 — selection vectors.** A predicate over a batch yields a `Selection` (just
+the surviving row indices); each column is then aggregated or materialised
+lazily, so unused columns are never copied. Filtering a 4-column batch (10% pass)
+and summing 2 of the columns:
+
+| | time |
+|---|---:|
+| Materialise the filtered batch, then sum 2 cols | 43.7 ms |
+| **Keep a selection, sum 2 cols through it**     | **13.2 ms** |
+
+**3.3×** — the selection skips copying the two unused columns and the whole
+record-batch allocation. (For a *single* filter→aggregate the two are a wash;
+the win is multi-column / multi-step, which is the realistic query shape.)

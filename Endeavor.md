@@ -195,25 +195,31 @@ random, still hits a warm-ish buffer; the prefix mainly saves the compare itself
 column, join-key hashing on the inline bytes, and a transcoder to/from Arrow Utf8
 at the IPC boundary.
 
-### C2. Selection vectors instead of materialising filter/take — *very high (deferred)*
-`compute_filter`/`compute_take` currently allocate and copy a new contiguous
-array. A vectorised engine instead returns a **selection vector** (a list of
-surviving indices) and defers materialisation, letting later kernels operate
-through the selection. Breaks the "kernel returns a dense Array" contract.
+### C2. Selection vectors instead of materialising filter/take — ✅ *done*
+Implemented (`selection.odin`): `Selection` (surviving row indices),
+`compute_select(mask)`, `compute_sum_selection` (aggregate through a selection),
+`selection_take` (materialise one column lazily), and `record_batch_take` (the
+eager batch materialisation, for comparison).
 
-*Sequencing note:* for a **single** filter→aggregate, a selection vector is
-roughly a wash (it still scans the mask and touches the surviving rows, just via
-indices instead of a copy). Its real win needs **multi-column tables** (filter
-once, gather only the columns/rows you actually use) or **chained operations**
-(combine selections without materialising between) — i.e. record-batch-level
-filtering, which doesn't exist yet. So C4 (which wins on a single column) was
-done first; C2 is best built alongside the table/group-by work.
+**Measured:** filtering a 4-column batch (10% pass) and summing 2 columns —
+**13.2 ms** keeping a selection and gathering only those 2 columns, vs **43.7 ms**
+materialising the whole filtered batch first (**3.3×**). As predicted, the win is
+multi-column: the selection never copies the 2 unused columns or allocates a
+batch. (A single filter→aggregate is a wash — that case is better served by C3.)
 
-### C3. Operator fusion / data-centric compilation — *very high, hard*
-Today `filter(...)` then `sum(...)` materialises the filtered array in between.
-Fusing the pipeline (`sum_where(values, mask)`) — or generating fused code per
-query — removes the intermediate buffer and a full extra pass over memory. The
-largest available win and the hardest; the natural endpoint once B/C2 exist.
+*Still open:* selection-aware min/max/take for all types, combining selections
+(chained predicates), and a SIMD compress for `compute_select` itself.
+
+### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
+Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and
+`compute_count_where` — filter+aggregate in a single pass with no intermediate
+array. **Measured:** `sum_where` **7.6 ms** vs `filter` then `sum` **34.2 ms
+(4.5×)**, and **5.5×** faster than PyArrow's `sum(filter(...))` (41.6 ms) — the
+intermediate array's allocation, dense copy, and re-read are all eliminated.
+
+*Still open:* the rest of the fused matrix (`min/max/mean_where`, `*_selection`
+for all reductions) and the hard, general version — **generating** a fused kernel
+per query/expression rather than hand-writing each combination.
 
 ### C4. Encoding-aware kernels (dictionary / RLE) — ✅ *run-end encoding done*
 Run aggregates over the **encoded** form instead of decoding first. Implemented
@@ -273,9 +279,12 @@ than DRAM-bound:
    - ✅ **C4 (run-end encoding)** — 385–510× on runny data; PyArrow can't do it.
    - ✅ **C4 (dictionary)** — value_counts 29× / 9.5× vs PyArrow (integer histogram).
    - ✅ **C1 (Umbra strings)** — 1.9× on string sort vs the Arrow layout.
-   - Remaining: **C2 + C3** together (selection vectors + fusion, which need
-     record-batch-level filtering).
-   These attack the bottleneck every experiment surfaced: bytes moved, not width.
+   - ✅ **C3 (fusion)** — sum_where 4.5× over filter+sum, 5.5× over PyArrow.
+   - ✅ **C2 (selection vectors)** — 3.3× on multi-column filter+aggregate.
+   The structural C-items are in. What remains are *extensions* (generic numeric
+   dictionary, REE/selection for all types, and the hard one — **general operator
+   fusion via codegen** rather than hand-written `*_where` kernels).
+   These attacked the bottleneck every experiment surfaced: bytes moved, not width.
 4. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
    `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.
