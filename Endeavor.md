@@ -232,9 +232,18 @@ array. **Measured:** `sum_where` **7.6 ms** vs `filter` then `sum` **34.2 ms
 (4.5×)**, and **5.5×** faster than PyArrow's `sum(filter(...))` (41.6 ms) — the
 intermediate array's allocation, dense copy, and re-read are all eliminated.
 
-*Still open:* the rest of the fused matrix (`min/max/mean_where`, `*_selection`
-for all reductions) and the hard, general version — **generating** a fused kernel
-per query/expression rather than hand-writing each combination.
+**General fusion — ✅ done** (`fusion.odin`): `compute_agg_where_compare`
+computes sum/count/min/max in one pass under a predicate, no mask or filtered
+array. The "codegen" is Odin's **monomorphisation** — one generic driver
+parameterised on the value type and a comptime `$OP` is specialised by the
+compiler into a tight fused kernel per combination, which is the compile-time
+equivalent of a query engine generating the loop at runtime.
+`SELECT sum,count,min,max WHERE pred>50` on 10M: fused **16.8 ms** vs unfused
+27.6 ms (1.64×) and PyArrow 70.2 ms (**4.2×**).
+
+*Still open:* fusing multi-predicate conjunctions and predicate-on-a-different-
+type-than-values into the same driver (currently same-type), and a small
+expression layer that builds these fused plans from a query description.
 
 ### C4. Encoding-aware kernels (dictionary / RLE) — ✅ *run-end encoding done*
 Run aggregates over the **encoded** form instead of decoding first. Implemented

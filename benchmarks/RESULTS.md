@@ -248,6 +248,23 @@ single pass with no allocation, replacing `filter(values, mask)` then `sum(...)`
 **4.5×** over OdinArrow's own filter+sum and **5.5×** over PyArrow — the
 intermediate array's allocation, dense copy, and re-read are all gone.
 
+**General fusion via compile-time specialisation.** Beyond hand-written
+`sum_where`, a single generic driver computes **sum, count, min and max in one
+pass under a predicate**, with no mask array and no filtered array. A query
+engine generates such a loop at runtime (codegen); Odin's monomorphisation does
+it at compile time — the driver is parameterised on the value type and a comptime
+`$OP`, so the compiler emits a tight fused kernel for each combination.
+`SELECT sum,count,min,max WHERE pred > 50` on 10M f64:
+
+| | time |
+|---|---:|
+| Unfused (compare→mask, then 3 aggregate passes) | 27.6 ms |
+| PyArrow (mask + filter + sum + min_max + count)  | 70.2 ms |
+| **Fused (one pass)**                             | **16.8 ms** |
+
+**1.64×** over OdinArrow's own unfused pipeline and **4.2×** over PyArrow — one
+pass over the two columns, all four aggregates, zero intermediate arrays.
+
 **C2 — selection vectors.** A predicate over a batch yields a `Selection` (just
 the surviving row indices); each column is then aggregated or materialised
 lazily, so unused columns are never copied. Filtering a 4-column batch (10% pass)
