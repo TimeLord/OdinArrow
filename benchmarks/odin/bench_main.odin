@@ -72,6 +72,25 @@ bench_sum_f64_mt :: proc() -> u64 {
 	return ns
 }
 
+// Same sum but over an array with 1% nulls — exercises the null-aware bulk
+// aggregation path (B2) rather than the all-valid fast path.
+bench_sum_f64_nulls_mt :: proc() -> u64 {
+	b := oa.builder_make(f64, N_LARGE)
+	for i in 0..<N_LARGE {
+		if i % 100 == 0 { oa.builder_append_null(&b) }
+		else            { oa.builder_append(&b, f64(i) * 0.001) }
+	}
+	arr, _ := oa.builder_finish(&b)
+	oa.builder_destroy(&b)
+
+	t0 := time.tick_now()
+	s, _ := oa.compute_sum_parallel(&arr)
+	ns := u64(time.duration_nanoseconds(time.tick_diff(t0, time.tick_now())))
+	_sink += s
+	oa.array_free(&arr)
+	return ns
+}
+
 bench_sum_i32_mt :: proc() -> u64 {
 	b := oa.builder_make(i32, N_LARGE)
 	for i in 0..<N_LARGE { oa.builder_append(&b, i32(i)) }
@@ -203,6 +222,7 @@ main :: proc() {
 
 	report("array_build_10m_i32", bench(bench_array_build))
 	report("sum_10m_f64_mt",      bench(bench_sum_f64_mt))
+	report("sum_10m_f64_nulls_mt", bench(bench_sum_f64_nulls_mt))
 	report("sum_10m_i32_mt",      bench(bench_sum_i32_mt))
 	report("min_max_10m_i32_mt",  bench(bench_min_max_i32_mt))
 	report("filter_10m_i32_mt",   bench(bench_filter_i32_mt))

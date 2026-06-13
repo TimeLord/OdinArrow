@@ -43,9 +43,12 @@ compute_sum_parallel :: proc(arr: ^Array, num_threads := 0) -> (sum: f64, valid_
 	defer delete(tasks)
 	defer delete(threads)
 
-	chunk := (arr.length + nt - 1) / nt
+	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
+	// validity-byte boundary — that keeps the null-aware bulk aggregation path
+	// (which needs offset % 8 == 0) active inside every worker.
+	chunk := (((arr.length + nt - 1) / nt) + 7) &~ 7
 	for i in 0..<nt {
-		from := i * chunk
+		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice = array_slice(arr^, from, to)
 		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_Sum_Task) {
@@ -84,9 +87,12 @@ _min_max_parallel :: proc(arr: ^Array, is_max: bool, num_threads: int) -> (val: 
 	defer delete(tasks)
 	defer delete(threads)
 
-	chunk := (arr.length + nt - 1) / nt
+	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
+	// validity-byte boundary — that keeps the null-aware bulk aggregation path
+	// (which needs offset % 8 == 0) active inside every worker.
+	chunk := (((arr.length + nt - 1) / nt) + 7) &~ 7
 	for i in 0..<nt {
-		from := i * chunk
+		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice  = array_slice(arr^, from, to)
 		tasks[i].is_max = is_max
@@ -152,9 +158,12 @@ compute_min_max_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64
 	defer delete(tasks)
 	defer delete(threads)
 
-	chunk := (arr.length + nt - 1) / nt
+	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
+	// validity-byte boundary — that keeps the null-aware bulk aggregation path
+	// (which needs offset % 8 == 0) active inside every worker.
+	chunk := (((arr.length + nt - 1) / nt) + 7) &~ 7
 	for i in 0..<nt {
-		from := i * chunk
+		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice = array_slice(arr^, from, to)
 		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_MM_Task) {
@@ -208,9 +217,12 @@ compute_filter_parallel :: proc(arr, mask: ^Array, num_threads := 0, allocator :
 	defer delete(tasks)
 	defer delete(threads)
 
-	chunk := (arr.length + nt - 1) / nt
+	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
+	// validity-byte boundary — that keeps the null-aware bulk aggregation path
+	// (which needs offset % 8 == 0) active inside every worker.
+	chunk := (((arr.length + nt - 1) / nt) + 7) &~ 7
 	for i in 0..<nt {
-		from := i * chunk
+		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice      = array_slice(arr^, from, to)
 		tasks[i].mask_slice = array_slice(mask^, from, to)

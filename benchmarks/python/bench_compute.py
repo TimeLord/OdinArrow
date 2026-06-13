@@ -32,6 +32,16 @@ def bench_sum_i32():
         times.append(time.perf_counter_ns() - t0)
     return median_ns(times)
 
+def bench_sum_f64_nulls():
+    vals = [None if i % 100 == 0 else i * 0.001 for i in range(N_LARGE)]
+    arr = pa.array(vals, type=pa.float64())
+    times = []
+    for _ in range(TRIALS):
+        t0 = time.perf_counter_ns()
+        pc.sum(arr)
+        times.append(time.perf_counter_ns() - t0)
+    return median_ns(times)
+
 # ── min / max ─────────────────────────────────────────────────────────────────
 
 def bench_min_max_i32():
@@ -58,7 +68,8 @@ def bench_filter_i32():
     return median_ns(times)
 
 if __name__ == "__main__":
-    report("sum_10m_f64",     bench_sum_f64())
-    report("sum_10m_i32",     bench_sum_i32())
+    report("sum_10m_f64",       bench_sum_f64())
+    report("sum_10m_f64_nulls", bench_sum_f64_nulls())
+    report("sum_10m_i32",       bench_sum_i32())
     report("min_max_10m_i32", bench_min_max_i32())
     report("filter_10m_i32",  bench_filter_i32())

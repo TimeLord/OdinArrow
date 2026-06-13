@@ -90,6 +90,21 @@ static ns_t bench_sum_i32() {
     return now_ns() - t0;
 }
 
+static ns_t bench_sum_f64_nulls() {
+    arrow::DoubleBuilder b;
+    for (int i = 0; i < N_LARGE; ++i) {
+        if (i % 100 == 0) (void)b.AppendNull();
+        else              (void)b.Append(i * 0.001);
+    }
+    std::shared_ptr<arrow::Array> arr;
+    (void)b.Finish(&arr);
+
+    auto t0 = now_ns();
+    auto res = arrow::compute::Sum(arr).ValueOrDie();
+    g_sink += res.scalar_as<arrow::DoubleScalar>().value;
+    return now_ns() - t0;
+}
+
 // ── min / max ─────────────────────────────────────────────────────────────────
 
 static ns_t bench_min_max_i32() {
@@ -212,6 +227,7 @@ int main() {
 
     report("array_build_10m_i32", run(bench_array_build));
     report("sum_10m_f64",         run(bench_sum_f64));
+    report("sum_10m_f64_nulls",   run(bench_sum_f64_nulls));
     report("sum_10m_i32",         run(bench_sum_i32));
     report("min_max_10m_i32",     run(bench_min_max_i32));
     report("filter_10m_i32",      run(bench_filter_i32));

@@ -500,3 +500,118 @@ test_sort_indices_string :: proc(t: ^testing.T) {
 	testing.expect_value(t, oa.array_get(&idx, 2, i64), i64(2))
 	testing.expect_value(t, oa.array_get(&idx, 3, i64), i64(0))
 }
+
+// ── null-aware aggregation (B2) ─────────────────────────────────────────────────
+
+// Build an f64 array with a deterministic sparse-null pattern and check the
+// bulk null-aware kernels against a scalar reference. N is not a multiple of 8,
+// so the run/mixed-byte/tail paths are all exercised.
+@(test)
+test_agg_with_nulls_matches_scalar :: proc(t: ^testing.T) {
+	N :: 1003
+	b := oa.builder_make(f64, N)
+	defer oa.builder_destroy(&b)
+
+	ref_sum:   f64 = 0.0
+	ref_min:   f64 = 1e18
+	ref_max:   f64 = -1e18
+	ref_valid: int = 0
+	for i in 0..<N {
+		if (i * 7 + 3) % 13 == 0 {
+			oa.builder_append_null(&b)
+		} else {
+			v := f64((i * 131) % 997) - 500.0
+			oa.builder_append(&b, v)
+			ref_sum += v
+			if v < ref_min { ref_min = v }
+			if v > ref_max { ref_max = v }
+			ref_valid += 1
+		}
+	}
+	arr, _ := oa.builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	sum, vc := oa.compute_sum(&arr)
+	testing.expect_value(t, vc, ref_valid)
+	testing.expect(t, approx_eq(sum, ref_sum, 1e-6))
+
+	lo, hi, vc2 := oa.compute_min_max(&arr)
+	testing.expect_value(t, vc2, ref_valid)
+	testing.expect(t, approx_eq(lo, ref_min, 1e-9))
+	testing.expect(t, approx_eq(hi, ref_max, 1e-9))
+
+	mn, _ := oa.compute_min(&arr)
+	mx, _ := oa.compute_max(&arr)
+	testing.expect(t, approx_eq(mn, ref_min, 1e-9))
+	testing.expect(t, approx_eq(mx, ref_max, 1e-9))
+}
+
+// Same idea for i32 (exercises the SIMD run reducers) plus an all-null array.
+@(test)
+test_agg_with_nulls_i32_and_empty :: proc(t: ^testing.T) {
+	N :: 512
+	b := oa.builder_make(i32, N)
+	defer oa.builder_destroy(&b)
+	ref_sum := 0.0; ref_lo := 1 << 30; ref_hi := -(1 << 30); ref_valid := 0
+	for i in 0..<N {
+		if i % 5 == 0 {
+			oa.builder_append_null(&b)
+		} else {
+			v := (i * 37) % 251 - 120
+			oa.builder_append(&b, i32(v))
+			ref_sum += f64(v)
+			if v < ref_lo { ref_lo = v }
+			if v > ref_hi { ref_hi = v }
+			ref_valid += 1
+		}
+	}
+	arr, _ := oa.builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	sum, vc := oa.compute_sum(&arr)
+	testing.expect_value(t, vc, ref_valid)
+	testing.expect(t, approx_eq(sum, ref_sum, 1e-9))
+	lo, hi, _ := oa.compute_min_max(&arr)
+	testing.expect(t, approx_eq(lo, f64(ref_lo), 1e-9))
+	testing.expect(t, approx_eq(hi, f64(ref_hi), 1e-9))
+
+	// All-null array: valid_count 0, no crash.
+	nb := oa.builder_make(i32, 20)
+	defer oa.builder_destroy(&nb)
+	for _ in 0..<20 { oa.builder_append_null(&nb) }
+	na, _ := oa.builder_finish(&nb)
+	defer oa.array_free(&na)
+	s2, v2 := oa.compute_sum(&na)
+	testing.expect_value(t, v2, 0)
+	testing.expect(t, approx_eq(s2, 0.0, 1e-12))
+}
+
+// A sliced array exercises both the byte-aligned (offset 8) bulk path and the
+// unaligned (offset 3) fallback path.
+@(test)
+test_agg_with_nulls_sliced :: proc(t: ^testing.T) {
+	N :: 200
+	b := oa.builder_make(f64, N)
+	defer oa.builder_destroy(&b)
+	for i in 0..<N {
+		if i % 11 == 0 { oa.builder_append_null(&b) }
+		else           { oa.builder_append(&b, f64(i)) }
+	}
+	arr, _ := oa.builder_finish(&b)
+	defer oa.array_free(&arr)
+
+	check :: proc(t: ^testing.T, a: ^oa.Array) {
+		ref_sum := 0.0; ref_valid := 0
+		for i in 0..<a.length {
+			if !oa.array_is_null(a, i) { ref_sum += oa.array_get(a, i, f64); ref_valid += 1 }
+		}
+		sum, vc := oa.compute_sum(a)
+		testing.expect_value(t, vc, ref_valid)
+		testing.expect(t, approx_eq(sum, ref_sum, 1e-6))
+	}
+
+	s_aligned := oa.array_slice(arr, 8, 180)   // offset 8  → bulk path
+	check(t, &s_aligned)
+	s_unaligned := oa.array_slice(arr, 3, 175)  // offset 3  → fallback path
+	check(t, &s_unaligned)
+}

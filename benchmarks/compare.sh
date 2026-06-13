@@ -46,6 +46,7 @@ done <<< "$CPP_OUT"
 ODIN_KEYS=(
     array_build_10m_i32
     sum_10m_f64_mt
+    sum_10m_f64_nulls_mt
     sum_10m_i32_mt
     min_max_10m_i32_mt
     filter_10m_i32_mt
@@ -57,6 +58,7 @@ ODIN_KEYS=(
 CPPPY_KEYS=(
     array_build_10m_i32
     sum_10m_f64
+    sum_10m_f64_nulls
     sum_10m_i32
     min_max_10m_i32
     filter_10m_i32
@@ -68,6 +70,7 @@ CPPPY_KEYS=(
 LABELS=(
     "Build 10M i32 (1% nulls)"
     "Sum 10M f64 (threaded)"
+    "Sum 10M f64 1% nulls (thr)"
     "Sum 10M i32 (threaded)"
     "Min+Max 10M i32 (threaded)"
     "Filter 10M i32 (threaded)"

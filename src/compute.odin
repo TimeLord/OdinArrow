@@ -26,6 +26,53 @@ compute_sum :: proc(arr: ^Array) -> (sum: f64, valid_count: int) {
 	return
 }
 
+// ── null-aware run reducers ─────────────────────────────────────────────────────
+//
+// Reduce a contiguous, all-valid run of `n` elements. These let the null-aware
+// aggregation paths process bitmap bytes that are 0xFF (8 valid in a row) with
+// the SIMD kernels instead of testing one bit at a time.
+
+_sum_run :: #force_inline proc(data: [^]$T, n: int) -> f64 {
+	when T == f64      { return _sum_f64_simd(data, n) }
+	else when T == i32 { return f64(_sum_i32_simd(data, n)) }
+	else {
+		s: f64
+		for i in 0..<n { s += f64(data[i]) }
+		return s
+	}
+}
+
+_min_run :: #force_inline proc(data: [^]$T, n: int) -> T {
+	when T == i32 { return _min_i32_simd(data, n) }
+	else {
+		best := data[0]
+		for i in 1..<n { best = min(best, data[i]) }
+		return best
+	}
+}
+
+_max_run :: #force_inline proc(data: [^]$T, n: int) -> T {
+	when T == i32 { return _max_i32_simd(data, n) }
+	else {
+		best := data[0]
+		for i in 1..<n { best = max(best, data[i]) }
+		return best
+	}
+}
+
+_min_max_run :: #force_inline proc(data: [^]$T, n: int) -> (lo: T, hi: T) {
+	when T == i32 { return _min_max_i32_simd(data, n) }
+	else {
+		lo = data[0]; hi = data[0]
+		for i in 1..<n {
+			v := data[i]
+			if v < lo { lo = v }
+			if v > hi { hi = v }
+		}
+		return
+	}
+}
+
 _sum_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (sum: f64, valid_count: int) {
 	data := cast([^]T)arr.buffers[1].data
 	off  := arr.offset
@@ -40,10 +87,42 @@ _sum_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (sum: f64, valid_co
 		}
 		valid_count = n
 	} else {
-		for i in 0..<n {
-			if array_is_valid(arr, i) {
-				sum += f64(data[off + i])
-				valid_count += 1
+		vbits := arr.buffers[0].data
+		if off & 7 != 0 {
+			// Unaligned slice offset: bitmap bytes don't line up with element
+			// groups, so fall back to per-element.
+			for i in 0..<n {
+				if array_is_valid(arr, i) { sum += f64(data[off + i]); valid_count += 1 }
+			}
+		} else {
+			// Coalesce all-valid (0xFF) bytes into runs reduced by the SIMD
+			// kernel; skip all-null (0) bytes; bit-test only mixed bytes.
+			bstart     := off >> 3
+			full_bytes := n >> 3
+			run_lo     := -1
+			for byi in 0..<full_bytes {
+				byte := vbits[bstart + byi]
+				if byte == 0xFF {
+					if run_lo < 0 { run_lo = byi << 3 }
+					valid_count += 8
+					continue
+				}
+				if run_lo >= 0 {
+					sum += _sum_run(data[off + run_lo:], (byi << 3) - run_lo)
+					run_lo = -1
+				}
+				if byte != 0 {
+					eb := byi << 3
+					for k in 0..<8 {
+						if (byte >> uint(k)) & 1 == 1 { sum += f64(data[off + eb + k]); valid_count += 1 }
+					}
+				}
+			}
+			if run_lo >= 0 {
+				sum += _sum_run(data[off + run_lo:], (full_bytes << 3) - run_lo)
+			}
+			for i := full_bytes << 3; i < n; i += 1 {
+				if bitmap_get(vbits, off + i) { sum += f64(data[off + i]); valid_count += 1 }
 			}
 		}
 	}
@@ -112,11 +191,53 @@ _min_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, vali
 		}
 		valid_count = n
 	} else {
-		for i in 0..<n {
-			if array_is_valid(arr, i) {
-				v := data[off + i]
-				if valid_count == 0 || v < best { best = v }
-				valid_count += 1
+		vbits := arr.buffers[0].data
+		if off & 7 != 0 {
+			for i in 0..<n {
+				if array_is_valid(arr, i) {
+					v := data[off + i]
+					if valid_count == 0 || v < best { best = v }
+					valid_count += 1
+				}
+			}
+		} else {
+			bstart     := off >> 3
+			full_bytes := n >> 3
+			seen       := false
+			run_lo     := -1
+			for byi in 0..<full_bytes {
+				byte := vbits[bstart + byi]
+				if byte == 0xFF {
+					if run_lo < 0 { run_lo = byi << 3 }
+					valid_count += 8
+					continue
+				}
+				if run_lo >= 0 {
+					r := _min_run(data[off + run_lo:], (byi << 3) - run_lo)
+					best = seen ? min(best, r) : r; seen = true
+					run_lo = -1
+				}
+				if byte != 0 {
+					eb := byi << 3
+					for k in 0..<8 {
+						if (byte >> uint(k)) & 1 == 1 {
+							v := data[off + eb + k]
+							best = seen ? min(best, v) : v; seen = true
+							valid_count += 1
+						}
+					}
+				}
+			}
+			if run_lo >= 0 {
+				r := _min_run(data[off + run_lo:], (full_bytes << 3) - run_lo)
+				best = seen ? min(best, r) : r; seen = true
+			}
+			for i := full_bytes << 3; i < n; i += 1 {
+				if bitmap_get(vbits, off + i) {
+					v := data[off + i]
+					best = seen ? min(best, v) : v; seen = true
+					valid_count += 1
+				}
 			}
 		}
 	}
@@ -139,11 +260,53 @@ _max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (max_val: f64, vali
 		}
 		valid_count = n
 	} else {
-		for i in 0..<n {
-			if array_is_valid(arr, i) {
-				v := data[off + i]
-				if valid_count == 0 || v > best { best = v }
-				valid_count += 1
+		vbits := arr.buffers[0].data
+		if off & 7 != 0 {
+			for i in 0..<n {
+				if array_is_valid(arr, i) {
+					v := data[off + i]
+					if valid_count == 0 || v > best { best = v }
+					valid_count += 1
+				}
+			}
+		} else {
+			bstart     := off >> 3
+			full_bytes := n >> 3
+			seen       := false
+			run_lo     := -1
+			for byi in 0..<full_bytes {
+				byte := vbits[bstart + byi]
+				if byte == 0xFF {
+					if run_lo < 0 { run_lo = byi << 3 }
+					valid_count += 8
+					continue
+				}
+				if run_lo >= 0 {
+					r := _max_run(data[off + run_lo:], (byi << 3) - run_lo)
+					best = seen ? max(best, r) : r; seen = true
+					run_lo = -1
+				}
+				if byte != 0 {
+					eb := byi << 3
+					for k in 0..<8 {
+						if (byte >> uint(k)) & 1 == 1 {
+							v := data[off + eb + k]
+							best = seen ? max(best, v) : v; seen = true
+							valid_count += 1
+						}
+					}
+				}
+			}
+			if run_lo >= 0 {
+				r := _max_run(data[off + run_lo:], (full_bytes << 3) - run_lo)
+				best = seen ? max(best, r) : r; seen = true
+			}
+			for i := full_bytes << 3; i < n; i += 1 {
+				if bitmap_get(vbits, off + i) {
+					v := data[off + i]
+					best = seen ? max(best, v) : v; seen = true
+					valid_count += 1
+				}
 			}
 		}
 	}
@@ -197,12 +360,54 @@ _min_max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, 
 		}
 		valid_count = n
 	} else {
-		for i in 0..<n {
-			if array_is_valid(arr, i) {
-				v := data[off + i]
-				if valid_count == 0 || v < lo { lo = v }
-				if valid_count == 0 || v > hi { hi = v }
-				valid_count += 1
+		vbits := arr.buffers[0].data
+		if off & 7 != 0 {
+			for i in 0..<n {
+				if array_is_valid(arr, i) {
+					v := data[off + i]
+					if valid_count == 0 || v < lo { lo = v }
+					if valid_count == 0 || v > hi { hi = v }
+					valid_count += 1
+				}
+			}
+		} else {
+			bstart     := off >> 3
+			full_bytes := n >> 3
+			seen       := false
+			run_lo     := -1
+			for byi in 0..<full_bytes {
+				byte := vbits[bstart + byi]
+				if byte == 0xFF {
+					if run_lo < 0 { run_lo = byi << 3 }
+					valid_count += 8
+					continue
+				}
+				if run_lo >= 0 {
+					rl, rh := _min_max_run(data[off + run_lo:], (byi << 3) - run_lo)
+					if seen { lo = min(lo, rl); hi = max(hi, rh) } else { lo = rl; hi = rh; seen = true }
+					run_lo = -1
+				}
+				if byte != 0 {
+					eb := byi << 3
+					for k in 0..<8 {
+						if (byte >> uint(k)) & 1 == 1 {
+							v := data[off + eb + k]
+							if seen { if v < lo { lo = v }; if v > hi { hi = v } } else { lo = v; hi = v; seen = true }
+							valid_count += 1
+						}
+					}
+				}
+			}
+			if run_lo >= 0 {
+				rl, rh := _min_max_run(data[off + run_lo:], (full_bytes << 3) - run_lo)
+				if seen { lo = min(lo, rl); hi = max(hi, rh) } else { lo = rl; hi = rh; seen = true }
+			}
+			for i := full_bytes << 3; i < n; i += 1 {
+				if bitmap_get(vbits, off + i) {
+					v := data[off + i]
+					if seen { if v < lo { lo = v }; if v > hi { hi = v } } else { lo = v; hi = v; seen = true }
+					valid_count += 1
+				}
 			}
 		}
 	}
