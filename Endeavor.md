@@ -216,8 +216,14 @@ dominates, and PyArrow's SIMD compares are faster there). The win **grows with
 the number of conjuncts**, since materialise-between re-copies every carried
 column per predicate while the selection just shrinks an index list.
 
-*Still open:* SIMD compares (PyArrow beats us per-predicate over N), selection-
-aware min/max/take for all types, and a SIMD compress for `compute_select`.
+**Vectorisable compares — ✅ done.** The comparison is now monomorphised on the
+operator (comptime `$OP`), so the inner loop is a single branchless vectorisable
+compare instead of a runtime `op` switch. The 2-predicate chained query went
+33 → **21 ms, now faster than PyArrow** (25.1 ms) where it had been losing.
+(`-microarch:native` regresses it — B1 again — so baseline stands.)
+
+*Still open:* a SIMD compress for `compute_select` (the index collection is still
+scalar), and selection-aware take for all types.
 
 ### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
 Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and

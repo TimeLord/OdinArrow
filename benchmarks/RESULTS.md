@@ -254,10 +254,14 @@ c0..c3 > 50 → SUM(pay)` on 10M rows:
 
 | #predicates | materialise between | chained selection |
 |---|---:|---:|
-| 2 | 33.3 ms | 33.1 ms (≈1×) |
+| 2 | 33.3 ms | **21.0 ms** |
 | 4 | 200.8 ms | **89.5 ms (2.24×)** |
 
-The win **grows with the number of conjuncts**: at 2 predicates the first 10M
-column scan dominates (a wash; PyArrow's SIMD compares are actually faster here),
-but each added predicate makes the materialise-between path re-copy every carried
-column while the selection just shrinks an index list.
+The win **grows with the number of conjuncts**: each added predicate makes the
+materialise-between path re-copy every carried column while the selection just
+shrinks an index list. The comparison itself is **monomorphised on the operator**
+(a comptime `$OP`, so the inner loop is a single branchless vectorisable compare
+rather than a runtime `op` switch) — that took the 2-predicate query from 33 ms
+to **21 ms, now faster than PyArrow's** `and(>,>)`+filter+sum (**25.1 ms**), which
+it had been losing. (Building the compare with `-microarch:native` *regresses* it,
+the same AVX2 pathology B1 found, so the baseline build stands.)
