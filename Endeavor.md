@@ -145,13 +145,24 @@ table (256-entry LUT) to pack matching lanes. `compute_take` likewise wants a
 SIMD gather (`vpgatherdd`). These are the kernels where vectorised engines pull
 furthest ahead of scalar code.
 
-### B5. Reuse a persistent thread pool — *medium*
-`compute_*_parallel` calls `thread.create_and_start_…` + `join` + `destroy`
-**every invocation** (`compute_parallel.odin:42-57, 83-103`) — ~50 µs of
-spawn/teardown per call. A package-level pool of parked workers fed via a queue
-amortises that to ~zero and makes small/medium parallel calls worthwhile (the
-current `PARALLEL_MIN_LENGTH` cutoff exists precisely because spawning is
-expensive). Compatible; purely an implementation change.
+### B5. Reuse a persistent thread pool — ✅ *done*
+~~`compute_*_parallel` spawns + joins + destroys threads every invocation.~~
+Implemented (`thread_pool.odin`): a process-lifetime pool of parked workers
+woken by a condition-variable broadcast (one partition per worker, barrier on
+completion); a submit mutex serialises whole jobs so concurrent callers (the
+multi-threaded test runner) take the pool in turn; pool allocations use the raw
+heap so the singleton never trips a tracking allocator.
+
+**Measured:** per-call parallel overhead **95 µs → 60 µs (~36%)** on a 300 K
+sum loop. But a second measurement reset expectations: parallel only beats
+serial **above ~256 K** (256 K → 1.45×, 512 K → 1.95×; 32–128 K parallel is
+*slower*). So at the margin the cost is **thread wakeup + barrier latency**
+(~15–25 µs to fan out to 8 cores and rejoin), not spawn — which means
+`PARALLEL_MIN_LENGTH` (262 144) is already well-placed and was **kept**. The pool
+still wins for workloads that make many parallel calls (the spawn churn is gone)
+and is the right foundation, but it does *not* let the cutoff drop. Headline 10M
+numbers are unchanged (work ≫ overhead there). Same recurring lesson as B1/B2:
+the bottleneck is rarely the thing you'd guess — measure it.
 
 ### B6. Inlining + prefetch in scans — *low/medium*
 `builder_append` is a normal (non-`#force_inline`) proc on the hot construction
@@ -220,17 +231,22 @@ removing per-element work is a 3.3× win once a kernel is cache-resident rather
 than DRAM-bound:
 
 - ✅ **B2** (null-aware aggregation) — done; +9% null overhead, 3.3× in-cache.
+- ✅ **B5** (persistent thread pool) — done; ~36% less per-call overhead (the
+  cutoff stays — wakeup latency, not spawn, sets the margin).
 1. **A1–A4** (reader hardening behind a `trusted` flag) — correctness/safety
    before any of this is pointed at real files.
-2. **B5** (persistent thread pool) — compatible; removes ~50 µs/call spawn cost
-   and makes small/medium parallel calls worthwhile.
-3. **B4** (SIMD filter/take), **B3** (wider SIMD coverage) — filter/take are not
+2. **B4** (SIMD filter/take), **B3** (wider SIMD coverage) — filter/take are not
    purely bandwidth-bound (branchy / scatter-gather), so vectorising them should
    pay off where the reductions didn't.
-4. **C2 → C4 → C1 → C3** — the structural changes that cut memory traffic and
+3. **C2 → C4 → C1 → C3** — the structural changes that cut memory traffic and
    move OdinArrow from "matches Arrow C++" to "beats it," in increasing effort.
    These (selection vectors, encoding-aware kernels, fusion) attack the actual
    bottleneck the experiments surfaced: bytes moved, not vector width.
-5. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
+4. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
    `_sum_i32_simd` AVX2 regression so a wide path never loses to the narrow one.
+
+> Recurring theme across B1/B2/B5: the headline 10M kernels are **memory-bound**,
+> so micro-optimisations (vector width, branch removal, spawn cost) only show up
+> once the data is cache-resident or the call is small. The durable wins are the
+> ones that **move fewer bytes** (C2/C3/C4), not the ones that compute faster.
