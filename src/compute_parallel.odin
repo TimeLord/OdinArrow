@@ -2,7 +2,6 @@ package odinarrow
 
 import "core:mem"
 import "core:os"
-import "core:thread"
 
 // ── parallel compute kernels ──────────────────────────────────────────────────
 //
@@ -38,10 +37,8 @@ compute_sum_parallel :: proc(arr: ^Array, num_threads := 0) -> (sum: f64, valid_
 		return compute_sum(arr)
 	}
 
-	tasks   := make([]_Sum_Task, nt)
-	threads := make([]^thread.Thread, nt)
+	tasks := make([]_Sum_Task, nt)
 	defer delete(tasks)
-	defer delete(threads)
 
 	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
 	// validity-byte boundary — that keeps the null-aware bulk aggregation path
@@ -51,17 +48,18 @@ compute_sum_parallel :: proc(arr: ^Array, num_threads := 0) -> (sum: f64, valid_
 		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice = array_slice(arr^, from, to)
-		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_Sum_Task) {
-			t.sum, t.valid = compute_sum(&t.slice)
-		})
 	}
-	thread.join_multiple(..threads)
+	_pool_run(nt, _sum_job, raw_data(tasks))
 	for i in 0..<nt {
-		thread.destroy(threads[i])
 		sum         += tasks[i].sum
 		valid_count += tasks[i].valid
 	}
 	return
+}
+
+_sum_job :: proc(ctx: rawptr, idx: int) {
+	t := &(cast([^]_Sum_Task)ctx)[idx]
+	t.sum, t.valid = compute_sum(&t.slice)
 }
 
 // ── min / max ─────────────────────────────────────────────────────────────────
@@ -82,10 +80,8 @@ _min_max_parallel :: proc(arr: ^Array, is_max: bool, num_threads: int) -> (val: 
 		return compute_min(arr)
 	}
 
-	tasks   := make([]_MinMax_Task, nt)
-	threads := make([]^thread.Thread, nt)
+	tasks := make([]_MinMax_Task, nt)
 	defer delete(tasks)
-	defer delete(threads)
 
 	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
 	// validity-byte boundary — that keeps the null-aware bulk aggregation path
@@ -96,17 +92,9 @@ _min_max_parallel :: proc(arr: ^Array, is_max: bool, num_threads: int) -> (val: 
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice  = array_slice(arr^, from, to)
 		tasks[i].is_max = is_max
-		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_MinMax_Task) {
-			if t.is_max {
-				t.val, t.valid = compute_max(&t.slice)
-			} else {
-				t.val, t.valid = compute_min(&t.slice)
-			}
-		})
 	}
-	thread.join_multiple(..threads)
+	_pool_run(nt, _min_max_job, raw_data(tasks))
 	for i in 0..<nt {
-		thread.destroy(threads[i])
 		if tasks[i].valid > 0 {
 			if valid_count == 0 {
 				val = tasks[i].val
@@ -119,6 +107,15 @@ _min_max_parallel :: proc(arr: ^Array, is_max: bool, num_threads: int) -> (val: 
 		}
 	}
 	return
+}
+
+_min_max_job :: proc(ctx: rawptr, idx: int) {
+	t := &(cast([^]_MinMax_Task)ctx)[idx]
+	if t.is_max {
+		t.val, t.valid = compute_max(&t.slice)
+	} else {
+		t.val, t.valid = compute_min(&t.slice)
+	}
 }
 
 compute_min_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64, valid_count: int) {
@@ -153,10 +150,8 @@ compute_min_max_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64
 		return compute_min_max(arr)
 	}
 
-	tasks   := make([]_MM_Task, nt)
-	threads := make([]^thread.Thread, nt)
+	tasks := make([]_MM_Task, nt)
 	defer delete(tasks)
-	defer delete(threads)
 
 	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
 	// validity-byte boundary — that keeps the null-aware bulk aggregation path
@@ -166,14 +161,10 @@ compute_min_max_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64
 		from := min(i * chunk, arr.length)
 		to   := min(from + chunk, arr.length)
 		tasks[i].slice = array_slice(arr^, from, to)
-		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_MM_Task) {
-			t.lo, t.hi, t.valid = compute_min_max(&t.slice)
-		})
 	}
-	thread.join_multiple(..threads)
+	_pool_run(nt, _mm_job, raw_data(tasks))
 
 	for i in 0..<nt {
-		thread.destroy(threads[i])
 		if tasks[i].valid > 0 {
 			if valid_count == 0 {
 				min_val = tasks[i].lo
@@ -186,6 +177,11 @@ compute_min_max_parallel :: proc(arr: ^Array, num_threads := 0) -> (min_val: f64
 		}
 	}
 	return
+}
+
+_mm_job :: proc(ctx: rawptr, idx: int) {
+	t := &(cast([^]_MM_Task)ctx)[idx]
+	t.lo, t.hi, t.valid = compute_min_max(&t.slice)
 }
 
 // ── filter ────────────────────────────────────────────────────────────────────
@@ -212,10 +208,8 @@ compute_filter_parallel :: proc(arr, mask: ^Array, num_threads := 0, allocator :
 		return compute_filter(arr, mask, allocator)
 	}
 
-	tasks   := make([]_Filter_Task, nt)
-	threads := make([]^thread.Thread, nt)
+	tasks := make([]_Filter_Task, nt)
 	defer delete(tasks)
-	defer delete(threads)
 
 	// Round the chunk up to a multiple of 8 so each sub-slice starts on a
 	// validity-byte boundary — that keeps the null-aware bulk aggregation path
@@ -227,13 +221,9 @@ compute_filter_parallel :: proc(arr, mask: ^Array, num_threads := 0, allocator :
 		tasks[i].slice      = array_slice(arr^, from, to)
 		tasks[i].mask_slice = array_slice(mask^, from, to)
 		tasks[i].allocator  = allocator
-		threads[i] = thread.create_and_start_with_poly_data(&tasks[i], proc(t: ^_Filter_Task) {
-			t.result, t.err = compute_filter(&t.slice, &t.mask_slice, t.allocator)
-		})
 	}
-	thread.join_multiple(..threads)
+	_pool_run(nt, _filter_job, raw_data(tasks))
 	for i in 0..<nt {
-		thread.destroy(threads[i])
 		if tasks[i].err != nil do err = tasks[i].err
 	}
 	defer for &t in tasks {
@@ -242,6 +232,11 @@ compute_filter_parallel :: proc(arr, mask: ^Array, num_threads := 0, allocator :
 	if err != nil do return
 
 	return _concat_fixed_width(arr.type, tasks, allocator)
+}
+
+_filter_job :: proc(ctx: rawptr, idx: int) {
+	t := &(cast([^]_Filter_Task)ctx)[idx]
+	t.result, t.err = compute_filter(&t.slice, &t.mask_slice, t.allocator)
 }
 
 // Concatenate the per-chunk filter results into one Array.
