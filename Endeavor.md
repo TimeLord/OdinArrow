@@ -256,8 +256,13 @@ ms** even on a dictionary array (9.5×) — the codes are the group ids, so ther
 no string hashing. Encode is a one-time 196 ms, amortised when the column arrives
 encoded from storage.
 
-*Still open under C4:* REE with nulls (run-level validity), a generic numeric
-dictionary (`Dict_Array($T)`), and multi-key group-by.
+**Generic numeric dictionary — ✅ done** (`Dict_Array(T)` in `dict.odin`):
+`dict_value_counts`, `dict_min_max`, `dict_sum`, encode/decode. `dict_min_max`
+is **~126,000×** (O(n_dict): the column min/max is the tiny dictionary's). Honest
+counter: `dict_sum` is 0.80× — the histogram increment is compute-bound and loses
+to SIMD sum despite the narrower codes.
+
+*Still open under C4:* REE with nulls (run-level validity) and multi-key group-by.
 
 ### C5. Drop the optional validity bitmap for declared non-null columns — *medium*
 Arrow always allows a validity buffer. A type-system flag for "non-nullable"

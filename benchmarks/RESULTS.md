@@ -214,6 +214,22 @@ PyArrow's own dictionary `value_counts`. Encoding the column is a one-time 196 m
 Parquet). `str_dict_group_sum` extends the same idea to grouped aggregation (sum
 a second column bucketed by code).
 
+A generic numeric `Dict_Array(T)` adds the same to numeric columns. Its standout
+is **min/max**: every logical element is one of the dictionary values, so the
+column min/max is just min/max of the (tiny) dictionary — O(n_dict), independent
+of length. 10M f64, 100 distinct:
+
+| | time |
+|---|---:|
+| OdinArrow plain `compute_min_max` | 12,795 µs |
+| **OdinArrow `dict_min_max`** | **0.1 µs (~126,000×)** |
+
+Honest counter-example, same file: **`dict_sum` is _not_ a win (0.80×)** — it
+reads the narrower i32 codes but the histogram's data-dependent load-add-store is
+compute-bound and loses to the SIMD sum. It's kept for summing an
+already-encoded column without decoding, not as a speedup — another reminder that
+the bottleneck is rarely the byte count alone.
+
 ## Fusion + selection vectors — don't materialise (Endeavor C3 + C2)
 
 The most direct application of "move fewer bytes": don't build the intermediate
