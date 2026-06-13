@@ -643,7 +643,10 @@ _ipc_write_i32 :: proc(f: ^os.File, v: i32) { _ipc_write_u32(f, u32(v)) }
 
 // Read all record batches from an Arrow IPC file.
 // The caller owns returned batches (call record_batch_free on each).
-ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
+// `validate` (default on) runs cheap structural guards plus an offset-buffer
+// integrity check on variable-length columns — pass false to skip the offset
+// check for files you produced yourself (trusted, max throughput).
+ipc_read_file :: proc(path: string, allocator := context.allocator, validate := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
     // Memory-map the file so pages fault in lazily; columns are decoded
     // zero-copy as views into the mapping.  Fall back to a plain read where
     // mmap is unavailable.  `release` is the matching deleter (munmap or, for
@@ -732,7 +735,7 @@ ipc_read_file :: proc(path: string, allocator := context.allocator) -> (schema: 
                 body_end   := body_start + blk_body
                 if body_end > n { body_end = n }
 
-                batch, batch_ok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator)
+                batch, batch_ok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator, validate)
                 if batch_ok { append(&batch_list, batch) }
             }
         }
@@ -788,7 +791,7 @@ ipc_write_stream :: proc(path: string, schema: ^Schema, batches: []Record_Batch)
 
 // Read an Arrow IPC stream.  The caller owns the returned schema and batches
 // exactly as with ipc_read_file (free batches, then schema_free + free(schema)).
-ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
+ipc_read_stream :: proc(path: string, allocator := context.allocator, validate := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
     data, unmap, mapped := _ipc_map_file(path)
     release: proc(_: []u8) = unmap
     if !mapped {
@@ -835,7 +838,7 @@ ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema
             body_padded := (int(body_length) + 7) & ~int(7)
             body_end := body_start + int(body_length)
             if body_end > n { body_end = n }
-            batch, bok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator)
+            batch, bok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator, validate)
             if bok { append(&batch_list, batch) }
             pos = body_start + body_padded
         case:
@@ -867,6 +870,36 @@ ipc_read_stream :: proc(path: string, allocator := context.allocator) -> (schema
 _ipc_view_buffer :: proc(body: []u8, off, length: int) -> Buffer {
     if length <= 0 || off < 0 || off+length > len(body) { return {} }
     return Buffer{ data = cast([^]u8)&body[off], size = length, capacity = length }
+}
+
+// A4: validate a variable-length column's offset buffer before it is trusted by
+// array_get_string (which slices the data buffer at offsets[i]..offsets[i+1]
+// through an unchecked multi-pointer). Offsets must start at 0, be monotonically
+// non-decreasing, and stay within the data buffer.
+_ipc_offsets_valid :: proc(off_buf, data_buf: Buffer, col_len, off_w: int) -> bool {
+    if col_len == 0 { return true }
+    if off_buf.data == nil || off_buf.size < (col_len + 1) * off_w { return false }
+    data_len := i64(data_buf.size)
+    if off_w == size_of(i32) {
+        o := cast([^]i32)off_buf.data
+        if o[0] != 0 { return false }
+        prev: i32 = 0
+        for k in 1..=col_len {
+            cur := o[k]
+            if cur < prev || i64(cur) > data_len { return false }
+            prev = cur
+        }
+    } else {
+        o := cast([^]i64)off_buf.data
+        if o[0] != 0 { return false }
+        prev: i64 = 0
+        for k in 1..=col_len {
+            cur := o[k]
+            if cur < prev || cur > data_len { return false }
+            prev = cur
+        }
+    }
+    return true
 }
 
 _rd_i32 :: #force_inline proc "contextless" (data: []u8, pos: int) -> i32 {
@@ -1061,6 +1094,7 @@ _ipc_decode_record_batch :: proc(
     schema: ^Schema,
     body:   []u8,
     allocator: mem.Allocator,
+    validate: bool = true,
 ) -> (batch: Record_Batch, ok: bool) {
     if len(meta) < 8 { return }
     root_off := _rd_u32(meta, 0)
@@ -1108,6 +1142,8 @@ _ipc_decode_record_batch :: proc(
             nv_ref := _rd_i32(meta, nv_pos)
             nv := nv_pos + int(nv_ref)
             n_nodes = int(_rd_u32(meta, nv))
+            // A2: reject counts that can't fit in the remaining metadata.
+            if n_nodes < 0 || nv < 0 || nv + 4 + n_nodes*16 > len(meta) { return }
             for i in 0..<n_nodes {
                 p := nv + 4 + i * 16
                 append(&node_lengths,    _rd_i64(meta, p))
@@ -1124,6 +1160,8 @@ _ipc_decode_record_batch :: proc(
             bv_ref := _rd_i32(meta, bv_pos)
             bv := bv_pos + int(bv_ref)
             n_bufs = int(_rd_u32(meta, bv))
+            // A2: reject counts that can't fit in the remaining metadata.
+            if n_bufs < 0 || bv < 0 || bv + 4 + n_bufs*16 > len(meta) { return }
             for i in 0..<n_bufs {
                 p := bv + 4 + i * 16
                 append(&buf_offsets, _rd_i64(meta, p))
@@ -1164,6 +1202,13 @@ _ipc_decode_record_batch :: proc(
                     data_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
                 }
                 buf_idx += 1
+                // A4: the offset buffer is attacker-controlled and is later used
+                // to slice the (unchecked) data buffer in array_get_string — so
+                // verify it is monotonic and in-bounds before handing it out.
+                if validate && !_ipc_offsets_valid(off_buf, data_buf, col_len, off_w) {
+                    delete(columns, allocator)
+                    return
+                }
                 columns[ci] = Array{type=dt, length=col_len, null_count=null_count, buffers={var_buf, off_buf, data_buf}}
             case Null_Type:
                 columns[ci] = Array{type=dt, length=col_len}

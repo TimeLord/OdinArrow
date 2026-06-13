@@ -338,3 +338,47 @@ test_ipc_multiple_batches :: proc(t: ^testing.T) {
     testing.expect_value(t, oa.array_get(col0, 2, i32), i32(3))
     testing.expect_value(t, oa.array_get(col1, 1, i32), i32(5))
 }
+
+// Security (A4): a file with a corrupt out-of-bounds string offset must be
+// rejected when validation is on, and the unsafe batch must not be returned.
+@(test)
+test_ipc_rejects_bad_offsets :: proc(t: ^testing.T) {
+    good := "/tmp/test_ipc_goodoff.arrow"
+    bad  := "/tmp/test_ipc_badoff.arrow"
+    defer os.remove(good); defer os.remove(bad)
+
+    fields := []oa.Field{oa.field_make("s", oa.String_Type{})}
+    schema, _ := oa.schema_make(fields)
+    defer oa.schema_free(&schema)
+    col := make_string_array([]string{"alpha", "beta", "gamma"})  // offsets [0,5,9,14]
+    batch, _ := oa.record_batch_make(&schema, []oa.Array{col})
+    defer oa.record_batch_free(&batch)
+    oa.ipc_write_file(good, &schema, []oa.Record_Batch{batch})
+
+    data, _ := os.read_entire_file(good, context.allocator)
+    defer delete(data)
+    // locate the i32 offsets buffer [0,5,9,14] and push the last offset OOB
+    pat := []u8{0,0,0,0, 5,0,0,0, 9,0,0,0, 14,0,0,0}
+    pos := -1
+    search: for i in 0..<len(data)-len(pat)+1 {
+        for j in 0..<len(pat) { if data[i+j] != pat[j] { continue search } }
+        pos = i; break
+    }
+    testing.expect(t, pos >= 0, "offsets pattern not found in file")
+    data[pos+12]=0xFF; data[pos+13]=0xFF; data[pos+14]=0xFF; data[pos+15]=0x7F  // 14 -> 0x7FFFFFFF
+    _ = os.write_entire_file(bad, data)
+
+    // validate (default) → corrupt batch rejected, not returned
+    sc, batches, ok := oa.ipc_read_file(bad)
+    testing.expect(t, ok)
+    testing.expect_value(t, len(batches), 0)
+    oa.schema_free(sc); free(sc); delete(batches)
+
+    // validate=false → the (unsafe) batch is returned, proving the check matters
+    sc2, batches2, ok2 := oa.ipc_read_file(bad, validate=false)
+    testing.expect(t, ok2)
+    testing.expect_value(t, len(batches2), 1)
+    oa.schema_free(sc2); free(sc2)
+    for bx in batches2 { bc := bx; oa.record_batch_free(&bc) }
+    delete(batches2)
+}
