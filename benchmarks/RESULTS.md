@@ -193,3 +193,23 @@ Sorting 1M random ~20-char strings (`sort_indices`):
 PyArrow, with identical ordering. The cost is ~30% more memory (fixed 16-byte
 slots vs `offsets + bytes`) — the classic Umbra trade. Kept as a separate
 `Umbra_Array` type, transcoded at an Arrow/IPC boundary.
+
+## Dictionary encoding — group-by as an integer histogram (Endeavor C4)
+
+For a low-cardinality column, store the distinct values once and an i32 `code`
+per element. The codes **are** the group ids, so `value_counts`/group-by is an
+integer histogram over the codes — no string hashing or comparison.
+
+`value_counts` on 10M strings with 100 distinct values:
+
+| | time |
+|---|---:|
+| PyArrow `value_counts` (plain string) | 190.6 ms |
+| PyArrow `value_counts` (dictionary)   | 62.6 ms |
+| **OdinArrow `str_dict_value_counts`** | **6.6 ms** |
+
+**29× faster** than PyArrow's plain-string group-by and **9.5× faster** than even
+PyArrow's own dictionary `value_counts`. Encoding the column is a one-time 196 ms
+(amortised — columns commonly arrive dictionary-encoded from storage, e.g.
+Parquet). `str_dict_group_sum` extends the same idea to grouped aggregation (sum
+a second column bucketed by code).

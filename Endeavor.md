@@ -227,9 +227,16 @@ plain sum 4541 µs (**385×**) and PyArrow's `pc.sum` 6045 µs (**510×**), on
 do — the clearest "superior to the original" win so far, and a direct payoff of
 the move-fewer-bytes thesis.
 
-*Still open under C4:* dictionary encoding (group-by on codes), REE with nulls
-(run-level validity), and threading the encoded kernels (rarely needed — O(runs)
-is already tiny).
+**Dictionary encoding — ✅ done** (`dict.odin`): `Str_Dict_Array` (a string
+dictionary + i32 codes), `str_dict_value_counts` (an integer histogram over the
+codes) and `str_dict_group_sum` (grouped aggregation). `value_counts` on 10M
+strings / 100 distinct: **6.6 ms** vs PyArrow **190 ms** plain (29×) and **62.6
+ms** even on a dictionary array (9.5×) — the codes are the group ids, so there is
+no string hashing. Encode is a one-time 196 ms, amortised when the column arrives
+encoded from storage.
+
+*Still open under C4:* REE with nulls (run-level validity), a generic numeric
+dictionary (`Dict_Array($T)`), and multi-key group-by.
 
 ### C5. Drop the optional validity bitmap for declared non-null columns — *medium*
 Arrow always allows a validity buffer. A type-system flag for "non-nullable"
@@ -264,9 +271,10 @@ than DRAM-bound:
 3. **C-items** — the structural changes that cut memory traffic and move
    OdinArrow from "matches Arrow C++" to "beats it."
    - ✅ **C4 (run-end encoding)** — 385–510× on runny data; PyArrow can't do it.
+   - ✅ **C4 (dictionary)** — value_counts 29× / 9.5× vs PyArrow (integer histogram).
    - ✅ **C1 (Umbra strings)** — 1.9× on string sort vs the Arrow layout.
-   - Remaining: **C4-dictionary** (group-by on codes), then **C2 + C3** together
-     (selection vectors + fusion, which need record-batch-level filtering).
+   - Remaining: **C2 + C3** together (selection vectors + fusion, which need
+     record-batch-level filtering).
    These attack the bottleneck every experiment surfaced: bytes moved, not width.
 4. **B1, narrowed** — runtime CPU dispatch only for kernels proven to be
    compute-bound (small/in-cache or post-fusion), and only after fixing the
