@@ -232,8 +232,15 @@ compare instead of a runtime `op` switch. The 2-predicate chained query went
 33 → **21 ms, now faster than PyArrow** (25.1 ms) where it had been losing.
 (`-microarch:native` regresses it — B1 again — so baseline stands.)
 
-*Still open:* a SIMD compress for `compute_select` (the index collection is still
-scalar), and selection-aware take for all types.
+**Compress — ✅ done.** `compute_select` now picks a strategy by selectivity (it
+already counts survivors): sparse uses a 64-bit-word **tzcnt** loop that visits
+only the set bits; dense uses the byte-at-a-time loop. 10M mask: 1% pass **4.2×**
+(841→200 µs), 10% **1.8×**, 50% unchanged. (A pure tzcnt compress regressed dense
+~1.5× — the `bits &= bits-1` chain serialises — hence the selectivity hybrid.)
+
+*Still open:* the same tzcnt compress for `compute_filter` (gathers values, not
+indices) and `_select_mono` (predicate→selection, one-pass dynamic append); and
+selection-aware take for all types.
 
 ### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
 Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and
