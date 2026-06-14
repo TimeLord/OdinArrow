@@ -242,8 +242,13 @@ only the set bits; dense uses the byte-at-a-time loop. 10M mask: 1% pass **4.2×
 10M i32, 1% pass **2.26×** (2129→943 µs), 10% 1.14×, 50% unchanged — a smaller
 win than select since filter also pays the scattered value gather.
 
-*Still open:* the tzcnt compress for `_select_mono` (predicate→selection,
-one-pass dynamic append) and selection-aware take for all types.
+`compute_select_compare` (predicate→selection) now routes through the vectorised
+compare → temp bitmap → the same selectivity-aware compress, dropping the
+per-element `[dynamic]` append (whose reallocations dominated when many rows
+passed): 10M f64 50% pass **2.25×** (31.6→14.0 ms). This cascaded into the
+4-predicate chained query: **89.5→54.8 ms** (now **3.66×** over materialise).
+
+*Still open:* selection-aware take for all types.
 
 ### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
 Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and

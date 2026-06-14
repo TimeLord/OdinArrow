@@ -288,7 +288,7 @@ c0..c3 > 50 → SUM(pay)` on 10M rows:
 | #predicates | materialise between | chained selection |
 |---|---:|---:|
 | 2 | 33.3 ms | **21.0 ms** |
-| 4 | 200.8 ms | **89.5 ms (2.24×)** |
+| 4 | 200.8 ms | **54.8 ms (3.66×)** |
 
 The win **grows with the number of conjuncts**: each added predicate makes the
 materialise-between path re-copy every carried column while the selection just
