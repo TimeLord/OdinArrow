@@ -66,18 +66,20 @@ returned, gated by `validate` on `ipc_read_file`/`ipc_read_stream` (default ON;
 offset is now rejected; valid PyArrow files still read. Covered by
 `test_ipc_rejects_bad_offsets`.
 
-### A5. mmap lifetime / concurrent truncation → SIGBUS — *low*
+### A5. mmap lifetime / concurrent truncation → SIGBUS — ✅ *done*
 A memory-mapped file truncated by another process faults (SIGBUS) on access of
-the vanished pages. Document that mmap'd reads assume a stable file, and offer a
-"copy" read mode for hostile environments.
+the vanished pages. Fixed by adding `use_mmap` to `ipc_read_file`/`ipc_read_stream`
+(default true = the zero-copy fast path, assumes a stable file); `use_mmap=false`
+reads the file into a private heap buffer, so a concurrent truncation can't fault
+a mapping that no longer exists. The default is documented as assuming a stable
+file. (`test_ipc_copy_mode`.)
 
-> **Status:** A1–A4 are done. A2/A4 added a `validate` flag (default on, additive,
-> wire-format-unchanged); A1/A3 made the metadata reads bounds-safe and the
-> structural arithmetic overflow-safe, so the parser no longer reads out of bounds
-> or panics on a crafted/truncated file (it returns "malformed"), even under
-> `-no-bounds-check`. Verified by a structural fuzz test. **A5** (mmap SIGBUS on
-> concurrent truncation) is the only open item — still documented only; a "copy"
-> read mode (or SIGBUS handler) would close it for hostile environments.
+> **Status: the whole A-section is done.** A2/A4 added a `validate` flag (default
+> on, additive, wire-format-unchanged); A1/A3 made the metadata reads bounds-safe
+> and the structural arithmetic overflow-safe (no OOB/panic on crafted or
+> truncated input, even under `-no-bounds-check`, verified by a structural fuzz
+> test); A5 added `use_mmap=false` for a truncation-safe copy read. The IPC reader
+> is now hardened against malformed and adversarially-mutated files.
 
 ---
 
