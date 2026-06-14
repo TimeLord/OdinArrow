@@ -238,9 +238,12 @@ only the set bits; dense uses the byte-at-a-time loop. 10M mask: 1% pass **4.2×
 (841→200 µs), 10% **1.8×**, 50% unchanged. (A pure tzcnt compress regressed dense
 ~1.5× — the `bits &= bits-1` chain serialises — hence the selectivity hybrid.)
 
-*Still open:* the same tzcnt compress for `compute_filter` (gathers values, not
-indices) and `_select_mono` (predicate→selection, one-pass dynamic append); and
-selection-aware take for all types.
+`compute_filter` got the same hybrid (gathering values instead of indices):
+10M i32, 1% pass **2.26×** (2129→943 µs), 10% 1.14×, 50% unchanged — a smaller
+win than select since filter also pays the scattered value gather.
+
+*Still open:* the tzcnt compress for `_select_mono` (predicate→selection,
+one-pass dynamic append) and selection-aware take for all types.
 
 ### C3. Operator fusion — ✅ *hand-fused kernels done* (general codegen still open)
 Implemented (`compute_fused.odin`): `compute_sum_where(values, mask)` and
