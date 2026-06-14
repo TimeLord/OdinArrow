@@ -646,14 +646,22 @@ _ipc_write_i32 :: proc(f: ^os.File, v: i32) { _ipc_write_u32(f, u32(v)) }
 // `validate` (default on) runs cheap structural guards plus an offset-buffer
 // integrity check on variable-length columns — pass false to skip the offset
 // check for files you produced yourself (trusted, max throughput).
-ipc_read_file :: proc(path: string, allocator := context.allocator, validate := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
-    // Memory-map the file so pages fault in lazily; columns are decoded
-    // zero-copy as views into the mapping.  Fall back to a plain read where
-    // mmap is unavailable.  `release` is the matching deleter (munmap or, for
-    // the fallback, nil → heap delete).
-    data, unmap, mapped := _ipc_map_file(path)
-    release: proc(_: []u8) = unmap
-    if !mapped {
+// `use_mmap` (default true) memory-maps the file for zero-copy reads — fast, but
+// assumes the file stays stable: if another process truncates it underneath, a
+// later page access SIGBUSes (A5). Pass use_mmap=false in hostile/shared-storage
+// environments to read the file into a private heap buffer instead (a copy, but
+// truncation-safe). `validate` runs the structural + offset integrity checks.
+ipc_read_file :: proc(path: string, allocator := context.allocator, validate := true, use_mmap := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
+    // mmap so pages fault in lazily and columns are decoded zero-copy as views
+    // into the mapping; otherwise (disabled or unavailable) read into memory.
+    // `release` is the matching deleter (munmap, or nil → heap delete).
+    data: []u8
+    release: proc(_: []u8)
+    if use_mmap {
+        d, unmap, mapped := _ipc_map_file(path)
+        if mapped { data = d; release = unmap }
+    }
+    if data == nil {
         d, read_err := os.read_entire_file(path, allocator)
         if read_err != nil { return }
         data    = d
@@ -794,10 +802,16 @@ ipc_write_stream :: proc(path: string, schema: ^Schema, batches: []Record_Batch)
 
 // Read an Arrow IPC stream.  The caller owns the returned schema and batches
 // exactly as with ipc_read_file (free batches, then schema_free + free(schema)).
-ipc_read_stream :: proc(path: string, allocator := context.allocator, validate := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
-    data, unmap, mapped := _ipc_map_file(path)
-    release: proc(_: []u8) = unmap
-    if !mapped {
+// See ipc_read_file for `validate` / `use_mmap` (use_mmap=false is the
+// truncation-safe copy mode).
+ipc_read_stream :: proc(path: string, allocator := context.allocator, validate := true, use_mmap := true) -> (schema: ^Schema, batches: []Record_Batch, ok: bool) {
+    data: []u8
+    release: proc(_: []u8)
+    if use_mmap {
+        d, unmap, mapped := _ipc_map_file(path)
+        if mapped { data = d; release = unmap }
+    }
+    if data == nil {
         d, read_err := os.read_entire_file(path, allocator)
         if read_err != nil { return }
         data    = d

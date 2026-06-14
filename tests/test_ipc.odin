@@ -425,3 +425,31 @@ test_ipc_fuzz_no_crash :: proc(t: ^testing.T) {
     }
     testing.expect(t, true)  // survived: no OOB / panic
 }
+
+// A5: copy read mode (use_mmap=false) reads into a private buffer — no mapping
+// that could SIGBUS on concurrent truncation. Must read the same data.
+@(test)
+test_ipc_copy_mode :: proc(t: ^testing.T) {
+    path := "/tmp/test_ipc_copy.arrow"; defer os.remove(path)
+    fields := []oa.Field{oa.field_make("x", oa.Int32_Type{}), oa.field_make("s", oa.String_Type{})}
+    schema, _ := oa.schema_make(fields); defer oa.schema_free(&schema)
+    ic := make_i32_array([]i32{7, 8, 9})
+    scol := make_string_array([]string{"foo", "bar", "baz"})
+    batch, _ := oa.record_batch_make(&schema, []oa.Array{ic, scol}); defer oa.record_batch_free(&batch)
+    oa.ipc_write_file(path, &schema, []oa.Record_Batch{batch})
+
+    sc, batches, ok := oa.ipc_read_file(path, use_mmap = false)
+    testing.expect(t, ok)
+    defer {
+        oa.schema_free(sc); free(sc)
+        for bx in batches { bc := bx; oa.record_batch_free(&bc) }
+        delete(batches)
+    }
+    testing.expect_value(t, len(batches), 1)
+    cx := oa.record_batch_column_at(&batches[0], 0)
+    cs := oa.record_batch_column_at(&batches[0], 1)
+    testing.expect_value(t, oa.array_get(cx, 0, i32), i32(7))
+    testing.expect_value(t, oa.array_get(cx, 2, i32), i32(9))
+    testing.expect_value(t, oa.array_get_string(cs, 0), "foo")
+    testing.expect_value(t, oa.array_get_string(cs, 2), "baz")
+}
