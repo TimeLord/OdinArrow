@@ -103,63 +103,15 @@ _apply_rt :: #force_inline proc "contextless" (a: f64, op: Compare_Op, b: f64) -
 
 // ── first predicate → selection ─────────────────────────────────────────────
 
+// Evaluate the predicate into a temporary Bool mask with the vectorised compare,
+// then compress that mask into a selection. This avoids the per-element dynamic
+// append (whose repeated reallocations dominated, especially when many rows
+// pass), and inherits compute_select's selectivity-aware tzcnt/byte compress.
 compute_select_compare :: proc(arr: ^Array, op: Compare_Op, scalar: f64, allocator := context.allocator) -> Selection {
-	switch _ in arr.type {
-	case Int8_Type:    return _select_compare_typed(arr, op, scalar, i8,  allocator)
-	case Int16_Type:   return _select_compare_typed(arr, op, scalar, i16, allocator)
-	case Int32_Type:   return _select_compare_typed(arr, op, scalar, i32, allocator)
-	case Int64_Type:   return _select_compare_typed(arr, op, scalar, i64, allocator)
-	case UInt8_Type:   return _select_compare_typed(arr, op, scalar, u8,  allocator)
-	case UInt16_Type:  return _select_compare_typed(arr, op, scalar, u16, allocator)
-	case UInt32_Type:  return _select_compare_typed(arr, op, scalar, u32, allocator)
-	case UInt64_Type:  return _select_compare_typed(arr, op, scalar, u64, allocator)
-	case Float32_Type: return _select_compare_typed(arr, op, scalar, f32, allocator)
-	case Float64_Type: return _select_compare_typed(arr, op, scalar, f64, allocator)
-	case Null_Type, Bool_Type, String_Type, Large_String_Type, Binary_Type, Large_Binary_Type:
-		panic("compute_select_compare: type does not support ordering")
-	}
-	return {}
-}
-
-@(private="file")
-_select_compare_typed :: proc(arr: ^Array, op: Compare_Op, scalar: f64, $T: typeid, allocator: mem.Allocator) -> Selection {
-	n    := arr.length
-	data := cast([^]T)arr.buffers[1].data
-	off  := arr.offset
-	idx  := make([dynamic]i32, 0, max(n / 16, 16), allocator)
-
-	if arr.buffers[0].data == nil {
-		switch op {
-		case .Gt: _select_mono(data, off, n, scalar, &idx, .Gt)
-		case .Ge: _select_mono(data, off, n, scalar, &idx, .Ge)
-		case .Lt: _select_mono(data, off, n, scalar, &idx, .Lt)
-		case .Le: _select_mono(data, off, n, scalar, &idx, .Le)
-		case .Eq: _select_mono(data, off, n, scalar, &idx, .Eq)
-		case .Ne: _select_mono(data, off, n, scalar, &idx, .Ne)
-		}
-	} else {
-		for i in 0..<n {
-			if array_is_valid(arr, i) && _apply_rt(f64(data[off + i]), op, scalar) { append(&idx, i32(i)) }
-		}
-	}
-	return Selection{ indices = idx[:], length = len(idx), allocator = allocator }
-}
-
-// Build the mask byte branchlessly (vectorised compare), then extract indices
-// only for set bytes — so empty 8-runs are skipped cheaply.
-@(private="file")
-_select_mono :: proc(data: [^]$T, off, n: int, s: f64, idx: ^[dynamic]i32, $OP: Compare_Op) {
-	n_full := (n / 8) * 8
-	for i := 0; i < n_full; i += 8 {
-		b := _cmp8(data, off + i, s, OP)
-		if b == 0 { continue }
-		for bit in u8(0)..<8 {
-			if (b >> bit) & 1 == 1 { append(idx, i32(i + int(bit))) }
-		}
-	}
-	for i := n_full; i < n; i += 1 {
-		if _apply(f64(data[off + i]), s, OP) { append(idx, i32(i)) }
-	}
+	mask, err := compute_compare(arr, op, scalar, allocator)
+	if err != nil { return Selection{ allocator = allocator } }
+	defer array_free(&mask, allocator)
+	return compute_select(&mask, allocator)
 }
 
 // ── refine a selection by another predicate (evaluated at survivors only) ───
