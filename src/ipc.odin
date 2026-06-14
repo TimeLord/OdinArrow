@@ -684,56 +684,60 @@ ipc_read_file :: proc(path: string, allocator := context.allocator, validate := 
     // Parse footer root → Footer table
     if len(footer_fb) < 8 { return }
     ft_root := int(_rd_u32(footer_fb, 0))
-    if ft_root >= len(footer_fb) { return }
+    if !_fits(footer_fb, ft_root, 4) { return }
     ft_soff := _rd_i32(footer_fb, ft_root)
     ft_vt   := ft_root - int(ft_soff)
-    if ft_vt < 0 || ft_vt+6 > len(footer_fb) { return }
-    ft_vtsz := int(_rd_i16(footer_fb, ft_vt))
-    ft_nf   := (ft_vtsz - 4) / 2
+    if !_fits(footer_fb, ft_vt, 4) { return }
 
-    // Footer vtable layout: [version@0, schema@1, dictionaries@2, record_batches@3]
+    // Footer vtable: [version@0, schema@1, dictionaries@2, record_batches@3].
+    // Returns a field's offset-within-table, or 0 (absent / out of range).
     ft_get := proc(fb: []u8, vt, idx: int) -> int {
-        n := (int(_rd_i16(fb, vt))-4)/2
-        if idx >= n { return 0 }
-        return int(_rd_i16(fb, vt+4+idx*2))
+        if !_fits(fb, vt, 2) { return 0 }
+        nf := (int(_rd_i16(fb, vt)) - 4) / 2
+        if idx < 0 || idx >= nf { return 0 }
+        p := vt + 4 + idx*2
+        if !_fits(fb, p, 2) { return 0 }
+        return int(_rd_i16(fb, p))
     }
 
     // Schema is at vtable index 1 (index 0 is version i16).
     schema_fo := ft_get(footer_fb, ft_vt, 1)
     if schema_fo == 0 { return }
+    if !_fits(footer_fb, ft_root + schema_fo, 4) { return }
     schema_tbl := ft_root + schema_fo + int(_rd_i32(footer_fb, ft_root+schema_fo))
 
     schema = new(Schema, allocator)
     if !_ipc_read_schema_table(footer_fb, schema_tbl, schema, allocator) {
-        free(schema, allocator); return
+        free(schema, allocator); schema = nil; return
     }
 
     // Record batch blocks are at vtable index 3.
     rb_fo := ft_get(footer_fb, ft_vt, 3)
     batch_list := make([dynamic]Record_Batch, 0, 8, allocator)
 
-    if rb_fo > 0 {
+    if rb_fo > 0 && _fits(footer_fb, ft_root + rb_fo, 4) {
         bv_ref_pos := ft_root + rb_fo
         bv_ref     := _rd_i32(footer_fb, bv_ref_pos)
         bv         := bv_ref_pos + int(bv_ref)
-        if bv+4 <= len(footer_fb) {
+        if _fits(footer_fb, bv, 4) {
             n_blocks := int(_rd_u32(footer_fb, bv))
             for i in 0..<n_blocks {
                 // Block: {offset:i64(8), metaDataLength:i32(4), pad:4, bodyLength:i64(8)} = 24 bytes
-                bp  := bv + 4 + i * 24  // stride 24 (8-byte aligned)
-                if bp+24 > len(footer_fb) { break }
+                bp := bv + 4 + i * 24
+                if !_fits(footer_fb, bp, 24) { break }
                 blk_off  := int(_rd_i64(footer_fb, bp))
                 blk_meta := int(_rd_i32(footer_fb, bp+8))
                 blk_body := int(_rd_i64(footer_fb, bp+16))
 
                 // Message at blk_off: [continuation:4][size:4][flatbuffer][pad][body].
-                // metaDataLength spans the whole metadata region (prefix included),
-                // so the body begins exactly blk_meta bytes after blk_off.
-                if blk_off+blk_meta > n { break }
-                meta      := data[blk_off+8 : blk_off+blk_meta]
+                // metaDataLength spans the whole metadata region (prefix included);
+                // the body begins blk_meta bytes after blk_off.
+                if blk_off < 0 || blk_meta < 8 || blk_body < 0 { break }
+                if blk_off > n - blk_meta { break }     // overflow-safe: blk_off+blk_meta <= n
                 body_start := blk_off + blk_meta
-                body_end   := body_start + blk_body
-                if body_end > n { body_end = n }
+                if body_start > n - blk_body { break }   // body within file
+                meta      := data[blk_off+8 : blk_off+blk_meta]
+                body_end  := body_start + blk_body
 
                 batch, batch_ok := _ipc_decode_record_batch(meta, schema, data[body_start:body_end], allocator, validate)
                 if batch_ok { append(&batch_list, batch) }
@@ -741,7 +745,6 @@ ipc_read_file :: proc(path: string, allocator := context.allocator, validate := 
         }
     }
 
-    _ = ft_nf
     batches = batch_list[:]
     // Hand the backing block to the first batch (its columns are views into it);
     // record_batch_free releases it once.  Other batches reference it but never
@@ -876,9 +879,20 @@ _ipc_view_buffer :: proc(body: []u8, off, length: int) -> Buffer {
 // array_get_string (which slices the data buffer at offsets[i]..offsets[i+1]
 // through an unchecked multi-pointer). Offsets must start at 0, be monotonically
 // non-decreasing, and stay within the data buffer.
+// A1/A3: the data buffer of a fixed-width / bool column must actually hold
+// col_len elements, or array_get would read past the view (overflow-safe).
+_ipc_fixed_ok :: proc(dt: DataType, col_len: int, data_buf: Buffer) -> bool {
+    #partial switch _ in dt {
+    case Bool_Type: return data_buf.size >= bitmap_byte_count(col_len)
+    }
+    w := type_byte_width(dt)
+    return w > 0 && col_len <= data_buf.size / w
+}
+
 _ipc_offsets_valid :: proc(off_buf, data_buf: Buffer, col_len, off_w: int) -> bool {
     if col_len == 0 { return true }
-    if off_buf.data == nil || off_buf.size < (col_len + 1) * off_w { return false }
+    // Overflow-safe "need col_len+1 entries of off_w bytes": col_len < size/off_w.
+    if off_buf.data == nil || col_len < 0 || off_w <= 0 || col_len >= off_buf.size / off_w { return false }
     data_len := i64(data_buf.size)
     if off_w == size_of(i32) {
         o := cast([^]i32)off_buf.data
@@ -902,16 +916,36 @@ _ipc_offsets_valid :: proc(off_buf, data_buf: Buffer, col_len, off_w: int) -> bo
     return true
 }
 
+// A1/A3: true iff a `size`-byte read at `pos` lies within `data`. Written as
+// `pos <= len - size` (not `pos + size <= len`) so it can't overflow for a
+// hostile `pos`, and rejects negative pos/size.
+_fits :: #force_inline proc "contextless" (data: []u8, pos, size: int) -> bool {
+    return pos >= 0 && size >= 0 && pos <= len(data) - size
+}
+
+// A1: the structural-metadata readers are bounds-safe by construction — an
+// out-of-range position (computed from attacker-controlled offsets) yields 0
+// rather than reading out of bounds. They only ever read the small FlatBuffer
+// metadata, never bulk data, so the per-read check costs nothing measurable.
 _rd_i32 :: #force_inline proc "contextless" (data: []u8, pos: int) -> i32 {
+    if !_fits(data, pos, 4) { return 0 }
     return i32(data[pos]) | i32(data[pos+1])<<8 | i32(data[pos+2])<<16 | i32(data[pos+3])<<24
 }
 _rd_u32 :: #force_inline proc "contextless" (data: []u8, pos: int) -> u32 { return u32(_rd_i32(data, pos)) }
 _rd_i16 :: #force_inline proc "contextless" (data: []u8, pos: int) -> i16 {
+    if !_fits(data, pos, 2) { return 0 }
     return i16(data[pos]) | i16(data[pos+1])<<8
 }
 _rd_i64 :: #force_inline proc "contextless" (data: []u8, pos: int) -> i64 {
+    if !_fits(data, pos, 8) { return 0 }
     lo := u32(_rd_i32(data, pos)); hi := u32(_rd_i32(data, pos+4))
     return i64(u64(lo) | u64(hi)<<32)
+}
+
+// Bounds-safe single-byte read (for direct metadata byte fields).
+_rd_u8 :: #force_inline proc "contextless" (data: []u8, pos: int) -> u8 {
+    if !_fits(data, pos, 1) { return 0 }
+    return data[pos]
 }
 
 // Returns (header_type, body_length) from a Message FlatBuffer.
@@ -962,10 +996,10 @@ _ipc_decode_schema :: proc(meta: []u8, schema: ^Schema, allocator: mem.Allocator
 }
 
 _ipc_read_schema_table :: proc(data: []u8, tbl: int, schema: ^Schema, allocator: mem.Allocator) -> bool {
-    if tbl < 0 || tbl+4 > len(data) { return false }
+    if !_fits(data, tbl, 4) { return false }
     soff := _rd_i32(data, tbl)
     vt := tbl - int(soff)
-    if vt < 0 || vt+6 > len(data) { return false }
+    if !_fits(data, vt, 8) { return false }
     vt_size := _rd_i16(data, vt)
     n := (int(vt_size) - 4) / 2
     if n < 2 { return false }
@@ -976,13 +1010,15 @@ _ipc_read_schema_table :: proc(data: []u8, tbl: int, schema: ^Schema, allocator:
     fv_ref_pos := tbl + f1
     fv_ref := _rd_i32(data, fv_ref_pos)
     fv := fv_ref_pos + int(fv_ref)
-    if fv+4 > len(data) { return false }
+    if !_fits(data, fv, 4) { return false }
     n_fields := int(_rd_u32(data, fv))
+    // A2/A3: a field ref is 4 bytes, so the count can't exceed the bytes left.
+    if n_fields < 0 || fv < 0 || n_fields > (len(data) - fv - 4) / 4 { return false }
 
     fields := make([]Field, n_fields, allocator)
     for i in 0..<n_fields {
         elem_pos := fv + 4 + i * 4
-        if elem_pos+4 > len(data) { continue }
+        if !_fits(data, elem_pos, 4) { continue }
         fref := _rd_i32(data, elem_pos)
         ftbl := elem_pos + int(fref)
         fields[i] = _ipc_read_field(data, ftbl, allocator)
@@ -994,10 +1030,10 @@ _ipc_read_schema_table :: proc(data: []u8, tbl: int, schema: ^Schema, allocator:
 
 _ipc_read_field :: proc(data: []u8, tbl: int, allocator: mem.Allocator) -> Field {
     f: Field
-    if tbl < 0 || tbl+4 > len(data) { return f }
+    if !_fits(data, tbl, 4) { return f }
     soff := _rd_i32(data, tbl)
     vt := tbl - int(soff)
-    if vt < 0 || vt+4 > len(data) { return f }
+    if !_fits(data, vt, 4) { return f }
     vt_size := _rd_i16(data, vt)
     n := (int(vt_size) - 4) / 2
 
@@ -1010,9 +1046,9 @@ _ipc_read_field :: proc(data: []u8, tbl: int, allocator: mem.Allocator) -> Field
         name_ref_pos := tbl + fo
         name_ref     := _rd_i32(data, name_ref_pos)
         name_tbl     := name_ref_pos + int(name_ref)
-        if name_tbl+4 <= len(data) {
+        if _fits(data, name_tbl, 4) {
             name_len := int(_rd_u32(data, name_tbl))
-            if name_tbl+4+name_len <= len(data) {
+            if name_len >= 0 && _fits(data, name_tbl+4, name_len) {
                 name_bytes := make([]u8, name_len, allocator)
                 copy(name_bytes, data[name_tbl+4:name_tbl+4+name_len])
                 f.name = string(name_bytes)
@@ -1020,13 +1056,13 @@ _ipc_read_field :: proc(data: []u8, tbl: int, allocator: mem.Allocator) -> Field
         }
     }
     if fo := get_fo(data, vt, 1); fo > 0 {
-        f.nullable = data[tbl+fo] != 0
+        f.nullable = _rd_u8(data, tbl+fo) != 0
     } else {
         f.nullable = true
     }
     type_disc := u8(0)
     if fo := get_fo(data, vt, 2); fo > 0 {
-        type_disc = data[tbl+fo]
+        type_disc = _rd_u8(data, tbl+fo)
     }
     _ = n
 
@@ -1049,14 +1085,14 @@ _ipc_disc_to_datatype :: proc(data: []u8, disc: u8, tbl: int) -> DataType {
     case _IPC_TYPE_BINARY:      return Binary_Type{}
     case _IPC_TYPE_LARGEBINARY: return Large_Binary_Type{}
     case _IPC_TYPE_INT:
-        if tbl > 0 && tbl+4 <= len(data) {
+        if _fits(data, tbl, 4) {
             soff := _rd_i32(data, tbl)
             vt   := tbl - int(soff)
-            bw_off := int(_rd_i16(data, vt+4))  // bitWidth
+            bw_off := int(_rd_i16(data, vt+4))  // bitWidth   (reads are bounds-safe)
             sg_off := int(_rd_i16(data, vt+6))  // isSigned
             bw := i32(0); sg := true
-            if bw_off > 0 && tbl+bw_off+4 <= len(data) { bw = _rd_i32(data, tbl+bw_off) }
-            if sg_off > 0 && tbl+sg_off < len(data)    { sg = data[tbl+sg_off] != 0 }
+            if bw_off > 0 { bw = _rd_i32(data, tbl+bw_off) }
+            if sg_off > 0 { sg = _rd_u8(data, tbl+sg_off) != 0 }
             if sg {
                 switch bw {
                 case 8:  return Int8_Type{}
@@ -1075,7 +1111,7 @@ _ipc_disc_to_datatype :: proc(data: []u8, disc: u8, tbl: int) -> DataType {
         }
         return Int64_Type{}
     case _IPC_TYPE_FLOATINGPT:
-        if tbl > 0 && tbl+4 <= len(data) {
+        if _fits(data, tbl, 4) {
             soff := _rd_i32(data, tbl)
             vt := tbl - int(soff)
             pr_off := int(_rd_i16(data, vt+4))
@@ -1112,7 +1148,7 @@ _ipc_decode_record_batch :: proc(
 
     // header_type is at Message.field[1]
     header_type := u8(0)
-    if fo := get_fo(meta, vt, 1); fo > 0 { header_type = meta[tbl+fo] }
+    if fo := get_fo(meta, vt, 1); fo > 0 { header_type = _rd_u8(meta, tbl+fo) }
     // Find Message.header (field[2])
     if fo := get_fo(meta, vt, 2); fo == 0 { return }
     else {
@@ -1142,8 +1178,8 @@ _ipc_decode_record_batch :: proc(
             nv_ref := _rd_i32(meta, nv_pos)
             nv := nv_pos + int(nv_ref)
             n_nodes = int(_rd_u32(meta, nv))
-            // A2: reject counts that can't fit in the remaining metadata.
-            if n_nodes < 0 || nv < 0 || nv + 4 + n_nodes*16 > len(meta) { return }
+            // A2/A3: reject counts that can't fit (overflow-safe: each node 16 bytes).
+            if n_nodes < 0 || nv < 0 || nv+4 > len(meta) || n_nodes > (len(meta)-nv-4)/16 { return }
             for i in 0..<n_nodes {
                 p := nv + 4 + i * 16
                 append(&node_lengths,    _rd_i64(meta, p))
@@ -1160,8 +1196,8 @@ _ipc_decode_record_batch :: proc(
             bv_ref := _rd_i32(meta, bv_pos)
             bv := bv_pos + int(bv_ref)
             n_bufs = int(_rd_u32(meta, bv))
-            // A2: reject counts that can't fit in the remaining metadata.
-            if n_bufs < 0 || bv < 0 || bv + 4 + n_bufs*16 > len(meta) { return }
+            // A2/A3: reject counts that can't fit (overflow-safe: each buffer 16 bytes).
+            if n_bufs < 0 || bv < 0 || bv+4 > len(meta) || n_bufs > (len(meta)-bv-4)/16 { return }
             for i in 0..<n_bufs {
                 p := bv + 4 + i * 16
                 append(&buf_offsets, _rd_i64(meta, p))
@@ -1178,12 +1214,21 @@ _ipc_decode_record_batch :: proc(
             null_count := int(node_nullcounts[ci])
             dt := schema.fields[ci].type
 
+            if validate && (col_len < 0 || null_count < 0 || null_count > col_len) {
+                delete(columns, allocator); return
+            }
+
             // validity bitmap buffer
             var_buf: Buffer
             if buf_idx < n_bufs && buf_lengths[buf_idx] > 0 && null_count > 0 {
                 var_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
             }
             buf_idx += 1
+
+            // A1/A3: a validity bitmap must cover col_len bits.
+            if validate && null_count > 0 && (var_buf.data == nil || var_buf.size < bitmap_byte_count(col_len)) {
+                delete(columns, allocator); return
+            }
 
             switch _ in dt {
             case String_Type, Large_String_Type, Binary_Type, Large_Binary_Type:
@@ -1222,6 +1267,9 @@ _ipc_decode_record_batch :: proc(
                     data_buf = _ipc_view_buffer(body, int(buf_offsets[buf_idx]), int(buf_lengths[buf_idx]))
                 }
                 buf_idx += 1
+                if validate && !_ipc_fixed_ok(dt, col_len, data_buf) {
+                    delete(columns, allocator); return
+                }
                 columns[ci] = Array{type=dt, length=col_len, null_count=null_count, buffers={var_buf, data_buf, {}}}
             }
         }
