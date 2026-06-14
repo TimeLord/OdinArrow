@@ -1,5 +1,6 @@
 package odinarrow
 
+import "base:intrinsics"
 import "core:mem"
 
 // ── sum ───────────────────────────────────────────────────────────────────────
@@ -485,8 +486,27 @@ _filter_typed :: proc(arr, mask: ^Array, $T: typeid, allocator: mem.Allocator) -
 		src  := cast([^]T)arr.buffers[1].data
 		dst  := cast([^]T)data_buf.data
 		out_i := 0
-		if mask_off == 0 {
-			// Byte-at-a-time: read 8 mask bits at once to reduce branch mispredictions.
+		if mask_off == 0 && out_count * 4 < n {
+			// Sparse: visit only the set bits via tzcnt and gather their values —
+			// work ∝ survivors, no per-bit branch. (Same selectivity hybrid as
+			// compute_select; dense uses the byte loop below.)
+			words   := cast([^]u64)mask_bits
+			n_words := n / 64
+			for w in 0..<n_words {
+				bits := words[w]
+				base := w * 64
+				for bits != 0 {
+					t := intrinsics.count_trailing_zeros(bits)
+					dst[out_i] = src[arr_off + base + int(t)]
+					out_i += 1
+					bits &= bits - 1
+				}
+			}
+			for i := n_words * 64; i < n; i += 1 {
+				if bitmap_get(mask_bits, i) { dst[out_i] = src[arr_off + i]; out_i += 1 }
+			}
+		} else if mask_off == 0 {
+			// Dense: byte-at-a-time, skipping empty bytes.
 			n_full := (n / 8) * 8
 			for i := 0; i < n_full; i += 8 {
 				byte := mask_bits[i >> 3]
