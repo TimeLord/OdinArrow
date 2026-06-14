@@ -21,12 +21,19 @@ rather than memory corruption — but the moment the package is built with
 out-of-bounds reads. The string-offset case is unsafe even **with** bounds
 checks.
 
-### A1. Unvalidated FlatBuffer offsets → OOB read / panic — *high*
-`_rd_i32/_rd_i16/_rd_i64/_rd_u32` index `data[pos..]` with no check that `pos`
+### A1. Unvalidated FlatBuffer offsets → OOB read / panic — ✅ *done*
+The metadata read primitives (`_rd_i32/i16/i64/u32` + `_rd_u8`) are now
+bounds-safe: an out-of-range position (from attacker offsets, incl. a negative
+`vt = tbl - soff`) returns 0 instead of reading out of bounds — free, since they
+only touch the small FlatBuffer metadata. The remaining direct byte-indexes and
+slices in the schema/field/record-batch parsers are guarded by an overflow-safe
+`_fits(data, pos, size)` (written `pos <= len - size`), and the footer block
+bounds are tightened. *(Original finding below for context.)*
+`_rd_i32/_rd_i16/_rd_i64/_rd_u32` indexed `data[pos..]` with no check that `pos`
 is in range. Inputs flow straight from the file: `root_off := _rd_u32(meta, 0)`
 then `_rd_i32(meta, tbl)`; `vt := tbl - int(soff)` can go **negative**
 (`_ipc_decode_record_batch`, `_ipc_read_field`, footer parsing). A crafted
-root/soffset reads out of bounds.
+root/soffset read out of bounds.
 *Fix:* a checked reader (`_rd_i32_safe(data, pos) -> (v, ok)`) that verifies
 `0 <= pos && pos+size <= len(data)`, threaded through every decode path; treat
 any failure as "malformed file → return ok=false".
@@ -37,14 +44,16 @@ any failure as "malformed file → return ok=false".
 "malformed" instead of walking off the buffer. (The footer `n_blocks` and the
 fields-vector count are guarded similarly in their readers.)
 
-### A3. Integer overflow bypasses the body bounds check — *high*
-Buffer extents are computed with unchecked arithmetic — `(col_len + 1) *
-size_of(i32)`, `nv + 4 + i*16`, `body_start + blk_body` — where `col_len`/offsets
-come from the file as `i64`. A large value overflows `int`, producing a small or
-negative length that **passes** the `off+length > len(body)` guard in
-`_ipc_view_buffer`, after which a column views memory outside the body.
-*Fix:* use width-checked multiply/add (saturating to "invalid") for every
-size/offset derived from file data.
+### A3. Integer overflow bypasses the body bounds check — ✅ *done*
+Size/offset arithmetic that could overflow (`(col_len+1)*off_w`, `n_nodes*16`,
+`n_fields*4`, block bounds) is rewritten in division/subtraction form
+(`count > (len - pos - 4)/stride`, `col_len >= size/width`) so a hostile
+count/length can't wrap past a bounds check. Added per-column buffer-size
+validation — validity bitmap covers `col_len` bits, fixed-width/bool data holds
+`col_len` elements, plus the A4 offset check — so `col_len` can't exceed its
+buffers and make a later `array_get` read out of the view. Both A1 and A3 are
+covered by `test_ipc_fuzz_no_crash` (1500 random mutations + every truncation
+length read without crashing or leaking).
 
 ### A4. Offset buffers are never validated → memory disclosure — ✅ *done*
 The serious one: `array_get_string` slices `buffers[2].data[start:end]` through a
@@ -62,14 +71,13 @@ A memory-mapped file truncated by another process faults (SIGBUS) on access of
 the vanished pages. Document that mmap'd reads assume a stable file, and offer a
 "copy" read mode for hostile environments.
 
-> **Status:** A2 and A4 are done (a `validate` flag on the readers, default on,
-> wire-format-unchanged and additive). **A1 and A3 remain** — they need the raw
-> `_rd_*` reads and the size/offset arithmetic in the *structural* parser
-> (vtables, footer, field tables) wrapped in bounds/overflow checks so a crafted
-> structure returns "malformed" instead of panicking. In a normal bounds-checked
-> build A1/A3 are a DoS (panic), not memory corruption; they become unsafe only
-> under `-no-bounds-check`. A5 (mmap SIGBUS on concurrent truncation) is still
-> just documented — a "copy" read mode would close it.
+> **Status:** A1–A4 are done. A2/A4 added a `validate` flag (default on, additive,
+> wire-format-unchanged); A1/A3 made the metadata reads bounds-safe and the
+> structural arithmetic overflow-safe, so the parser no longer reads out of bounds
+> or panics on a crafted/truncated file (it returns "malformed"), even under
+> `-no-bounds-check`. Verified by a structural fuzz test. **A5** (mmap SIGBUS on
+> concurrent truncation) is the only open item — still documented only; a "copy"
+> read mode (or SIGBUS handler) would close it for hostile environments.
 
 ---
 
