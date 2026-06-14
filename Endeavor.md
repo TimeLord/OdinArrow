@@ -31,13 +31,11 @@ root/soffset reads out of bounds.
 `0 <= pos && pos+size <= len(data)`, threaded through every decode path; treat
 any failure as "malformed file → return ok=false".
 
-### A2. Unvalidated vector counts → resource exhaustion / OOB — *high*
-`n_nodes`, `n_bufs`, the fields-vector count, and footer `n_blocks` are read as
-`int(_rd_u32(...))` and used directly as loop bounds and `make([dynamic], n)`
-hints. A count of `0xFFFFFFFF` either allocates aggressively or walks off the
-buffer.
-*Fix:* reject counts that can't fit in the remaining bytes
-(`n * stride <= remaining`) before looping.
+### A2. Unvalidated vector counts → resource exhaustion / OOB — ✅ *done*
+`n_nodes` / `n_bufs` are now bounded against the remaining metadata
+(`nv + 4 + n_nodes*16 <= len(meta)`) before the loops, so a bogus count returns
+"malformed" instead of walking off the buffer. (The footer `n_blocks` and the
+fields-vector count are guarded similarly in their readers.)
 
 ### A3. Integer overflow bypasses the body bounds check — *high*
 Buffer extents are computed with unchecked arithmetic — `(col_len + 1) *
@@ -48,28 +46,30 @@ negative length that **passes** the `off+length > len(body)` guard in
 *Fix:* use width-checked multiply/add (saturating to "invalid") for every
 size/offset derived from file data.
 
-### A4. Offset buffers are never validated → memory disclosure — *high, subtle*
-For variable-length columns the decoder hands the file's offset buffer to the
-Array verbatim. `array_get_string` then does
-`arr.buffers[2].data[start:end]` where `start/end` are read from that offset
-buffer. `buffers[2].data` is a **multi-pointer** (`[^]u8`), and slicing a
-multi-pointer is **not bounds-checked** — so non-monotonic or out-of-range
-offsets read (and return as a string) arbitrary adjacent memory. This is
-exploitable even in a normal bounds-checked build.
-*Fix:* an opt-in `ipc_validate` pass (mirroring Arrow's `ValidateFull`):
-offsets are monotonically non-decreasing, `offsets[0] == 0`, and
-`offsets[length] == data_buffer_len`. Make the safe path the default for files
-from untrusted sources.
+### A4. Offset buffers are never validated → memory disclosure — ✅ *done*
+The serious one: `array_get_string` slices `buffers[2].data[start:end]` through a
+**multi-pointer** (unchecked), so a crafted non-monotonic/out-of-range offset
+read arbitrary memory back as a string — exploitable even in a bounds-checked
+build. Fixed: `_ipc_offsets_valid` checks variable-length offset buffers
+(`offsets[0] == 0`, monotonic, `<= data_buffer_len`) before the column is
+returned, gated by `validate` on `ipc_read_file`/`ipc_read_stream` (default ON;
+`validate=false` for self-produced files). A crafted file with an OOB string
+offset is now rejected; valid PyArrow files still read. Covered by
+`test_ipc_rejects_bad_offsets`.
 
 ### A5. mmap lifetime / concurrent truncation → SIGBUS — *low*
 A memory-mapped file truncated by another process faults (SIGBUS) on access of
 the vanished pages. Document that mmap'd reads assume a stable file, and offer a
 "copy" read mode for hostile environments.
 
-> **Suggested shape:** add a `IPC_Read_Options{ trusted: bool }`. `trusted`
-> (default for self-produced files) keeps today's fast path; untrusted runs the
-> checked readers (A1–A3) and `ipc_validate` (A4). None of this changes the wire
-> format, so it's purely additive.
+> **Status:** A2 and A4 are done (a `validate` flag on the readers, default on,
+> wire-format-unchanged and additive). **A1 and A3 remain** — they need the raw
+> `_rd_*` reads and the size/offset arithmetic in the *structural* parser
+> (vtables, footer, field tables) wrapped in bounds/overflow checks so a crafted
+> structure returns "malformed" instead of panicking. In a normal bounds-checked
+> build A1/A3 are a DoS (panic), not memory corruption; they become unsafe only
+> under `-no-bounds-check`. A5 (mmap SIGBUS on concurrent truncation) is still
+> just documented — a "copy" read mode would close it.
 
 ---
 
