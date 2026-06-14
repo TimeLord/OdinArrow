@@ -1,5 +1,6 @@
 package odinarrow
 
+import "base:intrinsics"
 import "core:mem"
 
 // Selection vectors (C2): the result of a predicate is a list of surviving row
@@ -38,25 +39,61 @@ compute_select :: proc(mask: ^Array, allocator := context.allocator) -> Selectio
 	}
 
 	idx := make([]i32, count, allocator)
-	k := 0
 	if mask.buffers[0].data == nil && moff == 0 {
-		n_full := (n / 8) * 8
-		for i := 0; i < n_full; i += 8 {
-			b := mbits[i >> 3]
-			if b == 0 { continue }
-			for bit in u8(0)..<8 {
-				if (b >> bit) & 1 == 1 { idx[k] = i32(i + int(bit)); k += 1 }
-			}
-		}
-		for i := n_full; i < n; i += 1 {
-			if bitmap_get(mbits, i) { idx[k] = i32(i); k += 1 }
-		}
+		// Two compress strategies, chosen by selectivity (we already counted):
+		//  - sparse: visit only set bits via tzcnt (work ∝ survivors)
+		//  - dense:  the byte-at-a-time loop, which skips empty bytes and has
+		//            more ILP than the tzcnt loop's serial `bits &= bits-1` chain
+		//            when ~half the bits are set.
+		if count * 4 < n { _compress_sparse(mbits, n, idx) }
+		else             { _compress_dense(mbits, n, idx) }
 	} else {
+		k := 0
 		for i in 0..<n {
 			if _mask_passes(mask, i) { idx[k] = i32(i); k += 1 }
 		}
 	}
 	return Selection{ indices = idx, length = count, allocator = allocator }
+}
+
+// Sparse compress: read 64 bits at a time and visit ONLY the set bits via
+// count-trailing-zeros (tzcnt). Work ∝ number of survivors. The bitmap is
+// u64-addressable from byte 0 (Arrow buffers are 64-byte aligned).
+_compress_sparse :: proc "contextless" (mbits: [^]u8, n: int, out: []i32) {
+	k := 0
+	words   := cast([^]u64)mbits
+	n_words := n / 64
+	for w in 0..<n_words {
+		bits := words[w]
+		base := w * 64
+		for bits != 0 {
+			t := intrinsics.count_trailing_zeros(bits)
+			out[k] = i32(base + int(t))
+			k += 1
+			bits &= bits - 1
+		}
+	}
+	for i := n_words * 64; i < n; i += 1 {
+		if bitmap_get(mbits, i) { out[k] = i32(i); k += 1 }
+	}
+}
+
+// Dense compress: byte-at-a-time, skipping empty bytes. Writes only the set
+// positions (no scratch slot needed) and keeps the per-byte loops independent,
+// which beats the tzcnt loop once a large fraction of bits are set.
+_compress_dense :: proc "contextless" (mbits: [^]u8, n: int, out: []i32) {
+	k := 0
+	n_full := (n / 8) * 8
+	for i := 0; i < n_full; i += 8 {
+		b := mbits[i >> 3]
+		if b == 0 { continue }
+		for bit in u8(0)..<8 {
+			if (b >> bit) & 1 == 1 { out[k] = i32(i + int(bit)); k += 1 }
+		}
+	}
+	for i := n_full; i < n; i += 1 {
+		if bitmap_get(mbits, i) { out[k] = i32(i); k += 1 }
+	}
 }
 
 // ── aggregate through a selection (no materialisation) ──────────────────────
