@@ -5,8 +5,11 @@ A native [Apache Arrow](https://arrow.apache.org/) implementation in the
 kernels, and the Arrow IPC format (Feather v2), with zero-overhead abstractions
 and explicit memory management.
 
-Files written by OdinArrow are read directly by **PyArrow** and **Apache Arrow
+Files written by OdinArrow are readable directly by **PyArrow** and **Apache Arrow
 C++**, and vice-versa.
+
+We aim to be faster than the original - with our appreciation of what the Apache
+Arrow project has accomplished.
 
 ## Highlights
 
@@ -76,25 +79,25 @@ trials, 10M-element numeric / 1M-element string workloads, recycling memory pool
 on both sides. `C++/Odin` is Arrow C++ time ÷ OdinArrow time; **> 1× means
 OdinArrow is faster**.
 
-| Benchmark | OdinArrow (ms) | Arrow C++ (ms) | C++/Odin |
-|---|---:|---:|---:|
-| Build 10M i32 (1% nulls)      | 17.89 |  32.94 | **1.84×** |
-| Build 1M strings (2% nulls)   |  5.10 |   6.41 | **1.26×** |
-| Sum 10M f64                   |  4.12 |   6.14 | **1.49×** |
-| Sum 10M f64 (1% nulls)        |  5.81 |   7.48 | **1.29×** |
-| Min+Max 10M i32               |  2.06 |   2.06 | **1.00×** |
-| Mean 10M f64                  |  4.33 |   5.64 | **1.30×** |
-| Filter 10M i32 (50% pass)     |  7.65 |  36.43 | **4.76×** |
-| Filter 10M i32 (1% pass)      |  0.83 |   1.92 | **2.30×** |
-| Take 10M i32 (1M indices)     |  8.97 |   9.30 | **1.04×** |
-| Sort indices 1M i32           | 32.42 | 124.36 | **3.84×** |
-| Cast 10M i32 → f64            |  4.48 |   7.85 | **1.75×** |
-| Add 10M i32                   |  4.49 |   6.30 | **1.40×** |
-| Compare 10M f64 > k           |  4.45 |   6.95 | **1.56×** |
-| Scan 1M strings              |  1.15 |   9.35 | **8.14×** |
-| Sum-where 10M f64 (50%)       |  7.40 |  42.31 | **5.72×** |
-| Value counts 10M str (100 distinct) |  7.94 | 59.54 | **7.50×** |
-| IPC roundtrip 10M i32 (w+r)   |  5.12 |   9.75 | **1.90×** |
+| Benchmark                           | OdinArrow (ms) | Arrow C++ (ms) |  C++/Odin |
+| ----------------------------------- | -------------: | -------------: | --------: |
+| Build 10M i32 (1% nulls)            |          17.89 |          32.94 | **1.84×** |
+| Build 1M strings (2% nulls)         |           5.10 |           6.41 | **1.26×** |
+| Sum 10M f64                         |           4.12 |           6.14 | **1.49×** |
+| Sum 10M f64 (1% nulls)              |           5.81 |           7.48 | **1.29×** |
+| Min+Max 10M i32                     |           2.06 |           2.06 | **1.00×** |
+| Mean 10M f64                        |           4.33 |           5.64 | **1.30×** |
+| Filter 10M i32 (50% pass)           |           7.65 |          36.43 | **4.76×** |
+| Filter 10M i32 (1% pass)            |           0.83 |           1.92 | **2.30×** |
+| Take 10M i32 (1M indices)           |           8.97 |           9.30 | **1.04×** |
+| Sort indices 1M i32                 |          32.42 |         124.36 | **3.84×** |
+| Cast 10M i32 → f64                  |           4.48 |           7.85 | **1.75×** |
+| Add 10M i32                         |           4.49 |           6.30 | **1.40×** |
+| Compare 10M f64 > k                 |           4.45 |           6.95 | **1.56×** |
+| Scan 1M strings                     |           1.15 |           9.35 | **8.14×** |
+| Sum-where 10M f64 (50%)             |           7.40 |          42.31 | **5.72×** |
+| Value counts 10M str (100 distinct) |           7.94 |          59.54 | **7.50×** |
+| IPC roundtrip 10M i32 (w+r)         |           5.12 |           9.75 | **1.90×** |
 
 **All 17 kernels are at parity or faster than Arrow C++.** The big margins come
 from fused kernels (`filter`, `sum-where`), dictionary group-by (`value counts`),
@@ -150,17 +153,17 @@ package. A complete, runnable tour of the API lives in
 
 ## Capabilities
 
-| Area | Status |
-|---|---|
-| Aligned buffers, bitmaps (popcount), zero-copy slice | ✅ |
-| Primitive + variable-length arrays & builders | ✅ |
-| LargeString / LargeBinary (i64 offsets) | ✅ |
-| Schema, RecordBatch, Table / ChunkedArray | ✅ |
-| Compute kernels (incl. SIMD + threaded) | ✅ |
-| IPC file & stream formats (pyarrow-compatible) | ✅ |
-| Memory-mapped zero-copy reads | ✅ |
-| Reusable buffer-pool allocator | ✅ |
-| Parquet, Flight RPC, GPU kernels | out of scope |
+| Area                                                 | Status       |
+| ---------------------------------------------------- | ------------ |
+| Aligned buffers, bitmaps (popcount), zero-copy slice | ✅           |
+| Primitive + variable-length arrays & builders        | ✅           |
+| LargeString / LargeBinary (i64 offsets)              | ✅           |
+| Schema, RecordBatch, Table / ChunkedArray            | ✅           |
+| Compute kernels (incl. SIMD + threaded)              | ✅           |
+| IPC file & stream formats (pyarrow-compatible)       | ✅           |
+| Memory-mapped zero-copy reads                        | ✅           |
+| Reusable buffer-pool allocator                       | ✅           |
+| Parquet, Flight RPC, GPU kernels                     | out of scope |
 
 See [`PLAN.md`](PLAN.md) for the full design and phase breakdown.
 
