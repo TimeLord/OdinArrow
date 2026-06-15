@@ -69,33 +69,48 @@ table = ipc.open_file("data.arrow").read_all()
 
 ## Benchmarks
 
-OdinArrow vs **PyArrow** vs **Apache Arrow C++** (the LLVM-compiled library
-PyArrow wraps, called directly). Intel i7-7700HQ (4c/8t), median of 5 trials,
-10M-element numeric / 1M-element string workloads.
+OdinArrow vs **Apache Arrow C++** (the LLVM-compiled library PyArrow wraps,
+called directly) — **both single-threaded**, so this is a true apples-to-apples
+per-core comparison of OdinArrow's serial kernels against Arrow's. Median of 5
+trials, 10M-element numeric / 1M-element string workloads, recycling memory pools
+on both sides. `C++/Odin` is Arrow C++ time ÷ OdinArrow time; **> 1× means
+OdinArrow is faster**.
 
-| Benchmark | OdinArrow (ms) | PyArrow (ms) | Arrow C++ (ms) | Py/Odin | C++/Odin |
-|---|---:|---:|---:|---:|---:|
-| Build 10M i32 (1% nulls)      | 44.2 | 957.5 | 41.7 | 21.7× | 0.94× |
-| Sum 10M f64 †                 |  3.5 |   6.2 |  6.1 |  1.8× | 1.74× |
-| Sum 10M i32 †                 |  2.1 |   2.5 |  2.5 |  1.2× | 1.20× |
-| Min+Max 10M i32 †             |  2.0 |   4.1 |  2.2 |  2.0× | 1.11× |
-| Filter 10M i32 (50% pass) †   | 13.2 |  36.1 | 39.5 |  2.8× | 3.00× |
-| Build 1M strings (2% nulls)   |  8.5 |  91.5 |  7.3 | 10.8× | 0.85× |
-| Scan 1M strings               |  1.0 |   9.5 |  9.2 |  9.1× | 8.80× |
-| IPC roundtrip 10M i32 (w+r)   |  5.2 |  11.0 | 10.3 |  2.1× | 1.96× |
+| Benchmark | OdinArrow (ms) | Arrow C++ (ms) | C++/Odin |
+|---|---:|---:|---:|
+| Build 10M i32 (1% nulls)      | 17.89 |  32.94 | **1.84×** |
+| Build 1M strings (2% nulls)   |  5.10 |   6.41 | **1.26×** |
+| Sum 10M f64                   |  4.12 |   6.14 | **1.49×** |
+| Sum 10M f64 (1% nulls)        |  5.81 |   7.48 | **1.29×** |
+| Min+Max 10M i32               |  2.06 |   2.06 | **1.00×** |
+| Mean 10M f64                  |  4.33 |   5.64 | **1.30×** |
+| Filter 10M i32 (50% pass)     |  7.65 |  36.43 | **4.76×** |
+| Filter 10M i32 (1% pass)      |  0.83 |   1.92 | **2.30×** |
+| Take 10M i32 (1M indices)     |  8.97 |   9.30 | **1.04×** |
+| Sort indices 1M i32           | 32.42 | 124.36 | **3.84×** |
+| Cast 10M i32 → f64            |  4.48 |   7.85 | **1.75×** |
+| Add 10M i32                   |  4.49 |   6.30 | **1.40×** |
+| Compare 10M f64 > k           |  4.45 |   6.95 | **1.56×** |
+| Scan 1M strings              |  1.15 |   9.35 | **8.14×** |
+| Sum-where 10M f64 (50%)       |  7.40 |  42.31 | **5.72×** |
+| Value counts 10M str (100 distinct) |  7.94 | 59.54 | **7.50×** |
+| IPC roundtrip 10M i32 (w+r)   |  5.12 |   9.75 | **1.90×** |
 
-Ratios > 1× mean OdinArrow is faster. **†** OdinArrow's reductions/filter run
-multi-threaded; PyArrow and Arrow C++ here are single-threaded, so those four
-rows bundle threading with per-core efficiency. The other rows are
-single-threaded on all three.
+**All 17 kernels are at parity or faster than Arrow C++.** The big margins come
+from fused kernels (`filter`, `sum-where`), dictionary group-by (`value counts`),
+and an LSD radix sort; SIMD compares and a per-proc-AVX2 `min/max` remove ALU
+overhead; element-wise kernels (`cast`/`add`/`take`) reach or beat parity via the
+recycling buffer pool plus non-temporal stores that skip the output buffer's
+read-for-ownership traffic. `min/max` and `take` sit at the memory-bandwidth floor,
+where both libraries are limited by RAM, not code.
 
-OdinArrow beats PyArrow on every benchmark, and is at parity with or ahead of
-Arrow C++ everywhere — including single-threaded construction, after zero-copy
-`finish()`, uninitialised data buffers, and the reusable buffer pool. Full
-analysis and methodology in [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+OdinArrow also beats **PyArrow** on every benchmark — typically several× up to
+~20× on construction (Python overhead removal). The 3-way OdinArrow / PyArrow /
+Arrow C++ comparison (with OdinArrow's multi-threaded `*_parallel` kernels) and
+full methodology are in [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
-Reproduce: `bash benchmarks/compare.sh` (needs `pyarrow` and the Arrow C++ libs;
-the script builds the Odin and C++ runners).
+Reproduce: `bash benchmarks/bench_odin_c.sh` (single-threaded, vs Arrow C++) or
+`bash benchmarks/compare.sh` (3-way, also needs `pyarrow`). Both build the runners.
 
 ## Building & testing
 
