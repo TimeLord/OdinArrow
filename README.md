@@ -180,4 +180,4 @@ programs/            CSV<->Parquet example programs (OdinArrow and Arrow-FFI)
 
 ## License
 
-BSD 3-Clause — see [LICENSE](LICENSE).
+Zlib License — see [LICENSE](LICENSE).
