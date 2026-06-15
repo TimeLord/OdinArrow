@@ -30,9 +30,12 @@ _Pool_Header :: struct {
 _POOL_HDR :: size_of(_Pool_Header)
 
 buffer_pool_init :: proc(pool: ^Buffer_Pool, backing := context.allocator) {
-	pool.backing   = backing
-	pool.free_list = make(map[int][dynamic]rawptr)
-	pool.bases     = make([dynamic]rawptr)
+	pool.backing = backing
+	// Bookkeeping always lives in the backing allocator, never context.allocator:
+	// callers commonly set context.allocator to this very pool, and routing the
+	// pool's own metadata through itself is reentrant (use-after-free).
+	pool.free_list = make(map[int][dynamic]rawptr, 16, backing)
+	pool.bases     = make([dynamic]rawptr, 0, 0, backing)
 }
 
 // Release every block the pool ever allocated, plus its bookkeeping.
@@ -124,7 +127,12 @@ _pool_get :: proc(pool: ^Buffer_Pool, size, alignment: int) -> (rawptr, mem.Allo
 _pool_put :: proc(pool: ^Buffer_Pool, user: rawptr) {
 	header := (^_Pool_Header)(rawptr(uintptr(user) - uintptr(_POOL_HDR)))
 	sz := header.size
-	s := pool.free_list[sz]   // nil [dynamic] if absent
+	s, ok := pool.free_list[sz]
+	if !ok {
+		// New bucket — back its stack with the pool's backing allocator so
+		// appends never reenter the pool via context.allocator.
+		s = make([dynamic]rawptr, 0, 0, pool.backing)
+	}
 	append(&s, user)
 	pool.free_list[sz] = s
 }

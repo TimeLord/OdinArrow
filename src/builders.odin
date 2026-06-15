@@ -36,7 +36,7 @@ builder_make :: proc($T: typeid, initial_cap := 64, allocator := context.allocat
 }
 
 // Append a non-null value.
-builder_append :: proc(b: ^Primitive_Builder($T), val: T) {
+builder_append :: #force_inline proc(b: ^Primitive_Builder($T), val: T) {
 	if b.length >= b.cap { _builder_grow_data(b) }
 	b.data[b.length] = val
 	if b.null_count > 0 {
@@ -48,7 +48,7 @@ builder_append :: proc(b: ^Primitive_Builder($T), val: T) {
 }
 
 // Append a null value.
-builder_append_null :: proc(b: ^Primitive_Builder($T)) {
+builder_append_null :: #force_inline proc(b: ^Primitive_Builder($T)) {
 	if b.length >= b.cap { _builder_grow_data(b) }
 	byte_i := b.length >> 3
 	if byte_i >= b.bm_cap { _builder_grow_bitmap(b, byte_i + 1) }

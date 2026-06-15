@@ -1,6 +1,7 @@
 package odinarrow
 
 import "core:mem"
+import "base:intrinsics"
 
 // Comparison predicates and selection refinement. The point is conjunctive
 // (AND) queries: with selections, each successive predicate is evaluated only on
@@ -80,10 +81,33 @@ _compare_typed :: proc(arr: ^Array, op: Compare_Op, scalar: f64, $T: typeid, all
 
 @(private="file")
 _compare_mono :: proc "contextless" (data: [^]$T, off, n: int, s: f64, out: [^]u8, $OP: Compare_Op) {
-	n_full := (n / 8) * 8
-	for i := 0; i < n_full; i += 8 { out[i >> 3] = _cmp8(data, off + i, s, OP) }
-	for i := n_full; i < n; i += 1 {
-		if _apply(f64(data[off + i]), s, OP) { out[i >> 3] |= 1 << u8(i & 7) }
+	when T == f64 {
+		// True SIMD compare → movemask: each 8-lane compare yields a mask vector
+		// whose per-lane MSB packs directly into one output byte (LSB = lane 0).
+		V  :: #simd[8]f64
+		sv := V(s)
+		vp := cast([^]V)(data[off:])
+		nv := n / 8
+		for i in 0..<nv {
+			v := vp[i]
+			m: #simd[8]u64
+			when      OP == .Gt { m = intrinsics.simd_lanes_gt(v, sv) }
+			else when OP == .Ge { m = intrinsics.simd_lanes_ge(v, sv) }
+			else when OP == .Lt { m = intrinsics.simd_lanes_lt(v, sv) }
+			else when OP == .Le { m = intrinsics.simd_lanes_le(v, sv) }
+			else when OP == .Eq { m = intrinsics.simd_lanes_eq(v, sv) }
+			else                { m = intrinsics.simd_lanes_ne(v, sv) }
+			out[i] = transmute(u8)intrinsics.simd_extract_msbs(m)
+		}
+		for i := nv * 8; i < n; i += 1 {
+			if _apply(data[off + i], s, OP) { out[i >> 3] |= 1 << u8(i & 7) }
+		}
+	} else {
+		n_full := (n / 8) * 8
+		for i := 0; i < n_full; i += 8 { out[i >> 3] = _cmp8(data, off + i, s, OP) }
+		for i := n_full; i < n; i += 1 {
+			if _apply(f64(data[off + i]), s, OP) { out[i >> 3] |= 1 << u8(i & 7) }
+		}
 	}
 }
 

@@ -31,6 +31,21 @@ buffer_make :: proc(size: int, allocator := context.allocator) -> (buf: Buffer, 
 	return
 }
 
+// Like buffer_make but leaves the bytes uninitialized. Only safe when the
+// caller fully overwrites every logical element (e.g. element-wise kernels that
+// write dst[i] for all i). Avoids a redundant zeroing pass over large buffers.
+buffer_make_uninit :: proc(size: int, allocator := context.allocator) -> (buf: Buffer, err: mem.Allocator_Error) {
+	capacity := max(align_up(size, ARROW_ALIGNMENT), ARROW_ALIGNMENT)
+	raw := mem.alloc_bytes_non_zeroed(capacity, ARROW_ALIGNMENT, allocator) or_return
+	buf = Buffer{
+		data      = raw_data(raw),
+		size      = size,
+		capacity  = capacity,
+		allocator = allocator,
+	}
+	return
+}
+
 // Release memory. Safe to call on zero-value Buffer and on slice-view Buffers
 // (allocator.procedure == nil means the Buffer does not own its memory).
 buffer_free :: proc(buf: ^Buffer) {

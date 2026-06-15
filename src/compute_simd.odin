@@ -88,19 +88,31 @@ _max_i32_simd :: #force_inline proc "contextless" (data: [^]i32, n: int) -> i32 
 // ── i32 min+max combined ──────────────────────────────────────────────────────
 
 // Single-pass min and max.  Returns (min, max); n must be > 0.
+// Explicit #simd vectors (vs a scalar unroll) so the packed min/max lowers to
+// real SIMD even on the baseline target, where i32 packed min/max isn't emitted
+// from autovectorised scalar `min`/`max`. Two vector pairs hide op latency.
 _min_max_i32_simd :: #force_inline proc "contextless" (data: [^]i32, n: int) -> (lo: i32, hi: i32) {
-	lo_a, lo_b, lo_c, lo_d := data[0], data[0], data[0], data[0]
-	hi_a, hi_b, hi_c, hi_d := data[0], data[0], data[0], data[0]
-	i := 0
-	for i + 4 <= n {
-		lo_a = min(lo_a, data[i]);   hi_a = max(hi_a, data[i])
-		lo_b = min(lo_b, data[i+1]); hi_b = max(hi_b, data[i+1])
-		lo_c = min(lo_c, data[i+2]); hi_c = max(hi_c, data[i+2])
-		lo_d = min(lo_d, data[i+3]); hi_d = max(hi_d, data[i+3])
-		i += 4
+	V  :: #simd[8]i32
+	vp := cast([^]V)data
+	nv := n / 8
+	if nv > 0 {
+		lo0 := vp[0]; lo1 := vp[0]
+		hi0 := vp[0]; hi1 := vp[0]
+		i := 1
+		for i + 1 < nv {
+			lo0 = intrinsics.simd_min(lo0, vp[i]);   hi0 = intrinsics.simd_max(hi0, vp[i])
+			lo1 = intrinsics.simd_min(lo1, vp[i+1]); hi1 = intrinsics.simd_max(hi1, vp[i+1])
+			i += 2
+		}
+		for ; i < nv; i += 1 {
+			lo0 = intrinsics.simd_min(lo0, vp[i]); hi0 = intrinsics.simd_max(hi0, vp[i])
+		}
+		lo = intrinsics.simd_reduce_min(intrinsics.simd_min(lo0, lo1))
+		hi = intrinsics.simd_reduce_max(intrinsics.simd_max(hi0, hi1))
+		for j := nv * 8; j < n; j += 1 { lo = min(lo, data[j]); hi = max(hi, data[j]) }
+	} else {
+		lo = data[0]; hi = data[0]
+		for j in 1..<n { lo = min(lo, data[j]); hi = max(hi, data[j]) }
 	}
-	lo = min(min(lo_a, lo_b), min(lo_c, lo_d))
-	hi = max(max(hi_a, hi_b), max(hi_c, hi_d))
-	for ; i < n; i += 1 { lo = min(lo, data[i]); hi = max(hi, data[i]) }
 	return
 }

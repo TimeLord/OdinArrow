@@ -114,7 +114,17 @@ b_ipc :: proc() -> u64 {
 }
 
 main :: proc() {
-	build_inputs()
+	build_inputs() // inputs allocated on the default heap (untimed)
+
+	// Route all timed allocations through a recycling buffer pool — the
+	// OdinArrow analogue of arrow::MemoryPool, which Arrow C++ uses by default.
+	// Without this, each kernel call mmap/munmaps its large output buffer and
+	// re-faults fresh pages, an allocator artefact rather than kernel cost.
+	pool: oa.Buffer_Pool
+	oa.buffer_pool_init(&pool)
+	defer oa.buffer_pool_destroy(&pool)
+	context.allocator = oa.buffer_pool_allocator(&pool)
+
 	report("build_i32_10m",        bench(b_build_i32))
 	report("build_str_1m",         bench(b_build_str))
 	report("sum_f64_10m",          bench(b_sum))

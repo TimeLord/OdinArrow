@@ -620,17 +620,17 @@ compute_take :: proc(arr, indices: ^Array, allocator := context.allocator) -> (r
 	_, ok := indices.type.(Int64_Type)
 	assert(ok, "compute_take: indices must be Int64_Type")
 	switch _ in arr.type {
-	case Int8_Type:    return _take_typed(arr, indices, i8,  allocator)
-	case Int16_Type:   return _take_typed(arr, indices, i16, allocator)
-	case Int32_Type:   return _take_typed(arr, indices, i32, allocator)
-	case Int64_Type:   return _take_typed(arr, indices, i64, allocator)
-	case UInt8_Type:   return _take_typed(arr, indices, u8,  allocator)
-	case UInt16_Type:  return _take_typed(arr, indices, u16, allocator)
-	case UInt32_Type:  return _take_typed(arr, indices, u32, allocator)
-	case UInt64_Type:  return _take_typed(arr, indices, u64, allocator)
-	case Float32_Type: return _take_typed(arr, indices, f32, allocator)
-	case Float64_Type: return _take_typed(arr, indices, f64, allocator)
-	case Bool_Type:    return _take_typed(arr, indices, bool, allocator)
+	case Int8_Type:    return _take_primitive(arr, indices, i8,  allocator)
+	case Int16_Type:   return _take_primitive(arr, indices, i16, allocator)
+	case Int32_Type:   return _take_primitive(arr, indices, i32, allocator)
+	case Int64_Type:   return _take_primitive(arr, indices, i64, allocator)
+	case UInt8_Type:   return _take_primitive(arr, indices, u8,  allocator)
+	case UInt16_Type:  return _take_primitive(arr, indices, u16, allocator)
+	case UInt32_Type:  return _take_primitive(arr, indices, u32, allocator)
+	case UInt64_Type:  return _take_primitive(arr, indices, u64, allocator)
+	case Float32_Type: return _take_primitive(arr, indices, f32, allocator)
+	case Float64_Type: return _take_primitive(arr, indices, f64, allocator)
+	case Bool_Type:    return _take_bool(arr, indices, allocator)
 	case String_Type:  return _take_string(arr, indices, allocator)
 	case Binary_Type:  return _take_binary(arr, indices, allocator)
 	case Null_Type, Large_String_Type, Large_Binary_Type:
@@ -639,16 +639,60 @@ compute_take :: proc(arr, indices: ^Array, allocator := context.allocator) -> (r
 	return
 }
 
-_take_typed :: proc(arr, indices: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+// Fixed-width gather: dst[i] = src[idx[i]], straight into the output buffer with
+// no builder. The no-null source path is a tight branchless loop; when the
+// source has nulls, the value is still gathered (garbage tolerated for null
+// slots) and the output validity bit is gathered alongside it. Index bounds are
+// the caller's responsibility (same contract as array_get).
+_take_primitive :: proc(arr, indices: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n   := indices.length
+	idx := (cast([^]i64)indices.buffers[1].data)[indices.offset:]
+	src := (cast([^]T)arr.buffers[1].data)[arr.offset:]
+
+	data_buf := buffer_make_uninit(n * size_of(T), allocator) or_return
+	dst := cast([^]T)data_buf.data
+
+	src_bm := arr.buffers[0].data
+	bitmap_buf: Buffer
+	null_count := 0
+	if src_bm == nil {
+		for i in 0..<n {
+			dst[i] = src[idx[i]]
+		}
+	} else {
+		bitmap_buf = buffer_make(bitmap_byte_count(n), allocator) or_return
+		for i in 0..<n {
+			j := idx[i]
+			dst[i] = src[j]
+			if bitmap_get(src_bm, arr.offset + int(j)) {
+				bitmap_set(bitmap_buf.data, i)
+			} else {
+				null_count += 1
+			}
+		}
+	}
+
+	result = Array{
+		type       = _data_type_for(T),
+		length     = n,
+		null_count = null_count,
+		buffers    = {bitmap_buf, data_buf, {}},
+	}
+	return
+}
+
+// Bool gather stays on the builder path: values are bit-packed, so there is no
+// contiguous [^]T to index into.
+_take_bool :: proc(arr, indices: ^Array, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	n := indices.length
-	b := builder_make(T, n, allocator)
+	b := builder_make(bool, n, allocator)
 	defer builder_destroy(&b)
 	for i in 0..<n {
 		idx := int(array_get(indices, i, i64))
 		if array_is_null(arr, idx) {
 			builder_append_null(&b)
 		} else {
-			builder_append(&b, array_get(arr, idx, T))
+			builder_append(&b, array_get(arr, idx, bool))
 		}
 	}
 	return builder_finish(&b, allocator)
@@ -690,16 +734,16 @@ _take_binary :: proc(arr, indices: ^Array, allocator: mem.Allocator) -> (result:
 // String and Bool types are not supported.
 compute_cast :: proc(arr: ^Array, to: DataType, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
 	switch _ in to {
-	case Int8_Type:    return _cast_to_typed(arr, i8,  allocator)
-	case Int16_Type:   return _cast_to_typed(arr, i16, allocator)
-	case Int32_Type:   return _cast_to_typed(arr, i32, allocator)
-	case Int64_Type:   return _cast_to_typed(arr, i64, allocator)
-	case UInt8_Type:   return _cast_to_typed(arr, u8,  allocator)
-	case UInt16_Type:  return _cast_to_typed(arr, u16, allocator)
-	case UInt32_Type:  return _cast_to_typed(arr, u32, allocator)
-	case UInt64_Type:  return _cast_to_typed(arr, u64, allocator)
-	case Float32_Type: return _cast_to_typed(arr, f32, allocator)
-	case Float64_Type: return _cast_to_typed(arr, f64, allocator)
+	case Int8_Type:    return _cast_to(arr, i8,  allocator)
+	case Int16_Type:   return _cast_to(arr, i16, allocator)
+	case Int32_Type:   return _cast_to(arr, i32, allocator)
+	case Int64_Type:   return _cast_to(arr, i64, allocator)
+	case UInt8_Type:   return _cast_to(arr, u8,  allocator)
+	case UInt16_Type:  return _cast_to(arr, u16, allocator)
+	case UInt32_Type:  return _cast_to(arr, u32, allocator)
+	case UInt64_Type:  return _cast_to(arr, u64, allocator)
+	case Float32_Type: return _cast_to(arr, f32, allocator)
+	case Float64_Type: return _cast_to(arr, f64, allocator)
 	case Null_Type, Bool_Type,
 	     String_Type, Large_String_Type,
 	     Binary_Type, Large_Binary_Type:
@@ -708,38 +752,63 @@ compute_cast :: proc(arr: ^Array, to: DataType, allocator := context.allocator) 
 	return
 }
 
-_cast_to_typed :: proc(arr: ^Array, $To: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
-	n := arr.length
-	b := builder_make(To, n, allocator)
-	defer builder_destroy(&b)
-	for i in 0..<n {
-		if array_is_null(arr, i) {
-			builder_append_null(&b)
-		} else {
-			builder_append(&b, To(_element_as_f64(arr, i)))
-		}
-	}
-	return builder_finish(&b, allocator)
-}
-
-_element_as_f64 :: #force_inline proc "contextless" (arr: ^Array, i: int) -> f64 {
-	idx := arr.offset + i
+// Dispatch on the source type so the inner conversion loop is monomorphised on
+// both From and To — a tight, vectorisable `dst[i] = To(src[i])` with no
+// per-element type switch.
+_cast_to :: proc(arr: ^Array, $To: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	switch _ in arr.type {
-	case Int8_Type:    return f64((cast([^]i8) arr.buffers[1].data)[idx])
-	case Int16_Type:   return f64((cast([^]i16)arr.buffers[1].data)[idx])
-	case Int32_Type:   return f64((cast([^]i32)arr.buffers[1].data)[idx])
-	case Int64_Type:   return f64((cast([^]i64)arr.buffers[1].data)[idx])
-	case UInt8_Type:   return f64(arr.buffers[1].data[idx])
-	case UInt16_Type:  return f64((cast([^]u16)arr.buffers[1].data)[idx])
-	case UInt32_Type:  return f64((cast([^]u32)arr.buffers[1].data)[idx])
-	case UInt64_Type:  return f64((cast([^]u64)arr.buffers[1].data)[idx])
-	case Float32_Type: return f64((cast([^]f32)arr.buffers[1].data)[idx])
-	case Float64_Type: return (cast([^]f64)arr.buffers[1].data)[idx]
+	case Int8_Type:    return _cast_impl(arr, i8,  To, allocator)
+	case Int16_Type:   return _cast_impl(arr, i16, To, allocator)
+	case Int32_Type:   return _cast_impl(arr, i32, To, allocator)
+	case Int64_Type:   return _cast_impl(arr, i64, To, allocator)
+	case UInt8_Type:   return _cast_impl(arr, u8,  To, allocator)
+	case UInt16_Type:  return _cast_impl(arr, u16, To, allocator)
+	case UInt32_Type:  return _cast_impl(arr, u32, To, allocator)
+	case UInt64_Type:  return _cast_impl(arr, u64, To, allocator)
+	case Float32_Type: return _cast_impl(arr, f32, To, allocator)
+	case Float64_Type: return _cast_impl(arr, f64, To, allocator)
 	case Null_Type, Bool_Type,
 	     String_Type, Large_String_Type,
 	     Binary_Type, Large_Binary_Type:
+		panic("compute_cast: unsupported source type")
 	}
-	return 0
+	return
+}
+
+_cast_impl :: proc(arr: ^Array, $From, $To: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n := arr.length
+	data_buf := buffer_make_uninit(n * size_of(To), allocator) or_return
+	dst := cast([^]To)data_buf.data
+	src := (cast([^]From)arr.buffers[1].data)[arr.offset:]
+	for i in 0..<n {
+		dst[i] = To(src[i])
+	}
+	// Cast preserves null positions exactly — copy the validity bitmap wholesale.
+	bitmap_buf := _validity_copy(arr, allocator) or_return
+	result = Array{
+		type       = _data_type_for(To),
+		length     = n,
+		null_count = array_null_count(arr),
+		buffers    = {bitmap_buf, data_buf, {}},
+	}
+	return
+}
+
+// Build a fresh validity buffer for [arr.offset, arr.offset+length). Returns a
+// zero-value Buffer when the input has no validity bitmap (all valid).
+_validity_copy :: proc(arr: ^Array, allocator: mem.Allocator) -> (buf: Buffer, err: mem.Allocator_Error) {
+	src := arr.buffers[0].data
+	if src == nil do return
+	n := arr.length
+	buf = buffer_make(bitmap_byte_count(n), allocator) or_return
+	if arr.offset & 7 == 0 {
+		mem.copy(rawptr(buf.data), rawptr(src[arr.offset >> 3:]), bitmap_byte_count(n))
+	} else {
+		for i in 0..<n {
+			if bitmap_get(src, arr.offset + i) do bitmap_set(buf.data, i)
+		}
+	}
+	return
 }
 
 // ── arithmetic (element-wise) ─────────────────────────────────────────────────
@@ -751,17 +820,27 @@ Arithmetic_Op :: enum { Add, Sub, Mul, Div }
 // null the output element is null.
 compute_arithmetic :: proc(left, right: ^Array, op: Arithmetic_Op, allocator := context.allocator) -> (result: Array, err: mem.Allocator_Error) {
 	assert(left.length == right.length, "compute_arithmetic: length mismatch")
+	switch op {
+	case .Add: return _arith_op(left, right, .Add, allocator)
+	case .Sub: return _arith_op(left, right, .Sub, allocator)
+	case .Mul: return _arith_op(left, right, .Mul, allocator)
+	case .Div: return _arith_op(left, right, .Div, allocator)
+	}
+	return
+}
+
+_arith_op :: proc(left, right: ^Array, $OP: Arithmetic_Op, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	switch _ in left.type {
-	case Int8_Type:    return _arith_typed(left, right, i8,  op, allocator)
-	case Int16_Type:   return _arith_typed(left, right, i16, op, allocator)
-	case Int32_Type:   return _arith_typed(left, right, i32, op, allocator)
-	case Int64_Type:   return _arith_typed(left, right, i64, op, allocator)
-	case UInt8_Type:   return _arith_typed(left, right, u8,  op, allocator)
-	case UInt16_Type:  return _arith_typed(left, right, u16, op, allocator)
-	case UInt32_Type:  return _arith_typed(left, right, u32, op, allocator)
-	case UInt64_Type:  return _arith_typed(left, right, u64, op, allocator)
-	case Float32_Type: return _arith_typed(left, right, f32, op, allocator)
-	case Float64_Type: return _arith_typed(left, right, f64, op, allocator)
+	case Int8_Type:    return _arith_impl(left, right, i8,  OP, allocator)
+	case Int16_Type:   return _arith_impl(left, right, i16, OP, allocator)
+	case Int32_Type:   return _arith_impl(left, right, i32, OP, allocator)
+	case Int64_Type:   return _arith_impl(left, right, i64, OP, allocator)
+	case UInt8_Type:   return _arith_impl(left, right, u8,  OP, allocator)
+	case UInt16_Type:  return _arith_impl(left, right, u16, OP, allocator)
+	case UInt32_Type:  return _arith_impl(left, right, u32, OP, allocator)
+	case UInt64_Type:  return _arith_impl(left, right, u64, OP, allocator)
+	case Float32_Type: return _arith_impl(left, right, f32, OP, allocator)
+	case Float64_Type: return _arith_impl(left, right, f64, OP, allocator)
 	case Null_Type, Bool_Type,
 	     String_Type, Large_String_Type,
 	     Binary_Type, Large_Binary_Type:
@@ -770,27 +849,46 @@ compute_arithmetic :: proc(left, right: ^Array, op: Arithmetic_Op, allocator := 
 	return
 }
 
-_arith_typed :: proc(left, right: ^Array, $T: typeid, op: Arithmetic_Op, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+// Monomorphised on both value type and op: the inner loop is a tight,
+// vectorisable `dst[i] = l[i] OP r[i]` with no per-element branching. The
+// validity bitmap is the AND of the two inputs (built only when nulls exist).
+_arith_impl :: proc(left, right: ^Array, $T: typeid, $OP: Arithmetic_Op, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	n := left.length
-	b := builder_make(T, n, allocator)
-	defer builder_destroy(&b)
+	data_buf := buffer_make_uninit(n * size_of(T), allocator) or_return
+	dst := cast([^]T)data_buf.data
+	l := (cast([^]T)left.buffers[1].data)[left.offset:]
+	r := (cast([^]T)right.buffers[1].data)[right.offset:]
 	for i in 0..<n {
-		if array_is_null(left, i) || array_is_null(right, i) {
-			builder_append_null(&b)
-			continue
-		}
-		l := array_get(left, i, T)
-		r := array_get(right, i, T)
-		v: T
-		switch op {
-		case .Add: v = l + r
-		case .Sub: v = l - r
-		case .Mul: v = l * r
-		case .Div: v = l / r
-		}
-		builder_append(&b, v)
+		when      OP == .Add { dst[i] = l[i] + r[i] }
+		else when OP == .Sub { dst[i] = l[i] - r[i] }
+		else when OP == .Mul { dst[i] = l[i] * r[i] }
+		else when OP == .Div { dst[i] = l[i] / r[i] }
 	}
-	return builder_finish(&b, allocator)
+
+	// Validity: null propagates if either side is null. Skip entirely when
+	// both inputs are fully valid (the common, hot path).
+	bitmap_buf: Buffer
+	null_count := 0
+	lbm := left.buffers[0].data
+	rbm := right.buffers[0].data
+	if lbm != nil || rbm != nil {
+		bitmap_buf = buffer_make(bitmap_byte_count(n), allocator) or_return
+		for i in 0..<n {
+			if array_is_valid(left, i) && array_is_valid(right, i) {
+				bitmap_set(bitmap_buf.data, i)
+			} else {
+				null_count += 1
+			}
+		}
+	}
+
+	result = Array{
+		type       = _data_type_for(T),
+		length     = n,
+		null_count = null_count,
+		buffers    = {bitmap_buf, data_buf, {}},
+	}
+	return
 }
 
 // Convenience wrappers.
@@ -842,8 +940,66 @@ _sort_finish_indices :: proc(idx: []i64, allocator: mem.Allocator) -> (result: A
 	return builder_finish(&b, allocator)
 }
 
+// LSD radix sort of indices by integer key — O(n · size_of(T)) with cache-
+// friendly sequential passes, versus the comparison merge sort's O(n log n)
+// indirect comparisons. Used for null-free fixed-width integer columns. Keys and
+// indices are permuted together each pass so reads stay sequential; signed keys
+// are bias-encoded (flip the sign bit) so an unsigned byte radix yields signed
+// order. Passes whose radix byte is constant are skipped (small-range columns).
+_radix_sort_indices :: proc(arr: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
+	n    := arr.length
+	data := (cast([^]T)arr.buffers[1].data)[arr.offset:]
+
+	enc :: #force_inline proc(v: T) -> u64 {
+		when      T == i8  { return u64((cast(u8) v) ~ 0x80) }
+		else when T == i16 { return u64((cast(u16)v) ~ 0x8000) }
+		else when T == i32 { return u64((cast(u32)v) ~ 0x8000_0000) }
+		else when T == i64 { return      (cast(u64)v) ~ 0x8000_0000_0000_0000 }
+		else               { return u64(v) } // u8/u16/u32/u64 already byte-ordered
+	}
+
+	keys := make([]u64, n, context.temp_allocator)
+	idx  := make([]i64, n, context.temp_allocator)
+	kbuf := make([]u64, n, context.temp_allocator)
+	ibuf := make([]i64, n, context.temp_allocator)
+	for i in 0..<n { keys[i] = enc(data[i]); idx[i] = i64(i) }
+
+	sk, dk := keys, kbuf
+	si, di := idx,  ibuf
+	for d in 0..<size_of(T) {
+		shift := uint(d) * 8
+		count: [256]int
+		for i in 0..<n { count[int((sk[i] >> shift) & 0xFF)] += 1 }
+		skip := false
+		for c in 0..<256 { if count[c] == n { skip = true; break } }
+		if skip { continue }
+		sum := 0
+		for c in 0..<256 { t := count[c]; count[c] = sum; sum += t }
+		for i in 0..<n {
+			b := int((sk[i] >> shift) & 0xFF)
+			p := count[b]; count[b] += 1
+			dk[p] = sk[i]
+			di[p] = si[i]
+		}
+		sk, dk = dk, sk
+		si, di = di, si
+	}
+
+	data_buf := buffer_make_uninit(n * size_of(i64), allocator) or_return
+	if n > 0 { mem.copy(rawptr(data_buf.data), raw_data(si), n * size_of(i64)) }
+	result = Array{type = Int64_Type{}, length = n, null_count = 0, buffers = {{}, data_buf, {}}}
+	return
+}
+
 _sort_indices_typed :: proc(arr: ^Array, $T: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	n := arr.length
+	when T != f32 && T != f64 {
+		// Null-free integer columns: radix sort (floats keep the comparison
+		// sort to avoid NaN / signed-zero ordering subtleties).
+		if n > 1 && array_null_count(arr) == 0 {
+			return _radix_sort_indices(arr, T, allocator)
+		}
+	}
 	idx := make([]i64, n, context.temp_allocator)
 	for i in 0..<n { idx[i] = i64(i) }
 	if n <= 1 { return _sort_finish_indices(idx, allocator) }

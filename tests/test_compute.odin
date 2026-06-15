@@ -457,6 +457,29 @@ test_sort_indices_i32 :: proc(t: ^testing.T) {
 	testing.expect_value(t, oa.array_get(&sorted, 4, i32), i32(40))
 }
 
+// Negative values exercise the radix sort's sign-bit bias encoding: a plain
+// unsigned byte radix would otherwise order negatives after positives.
+@(test)
+test_sort_indices_i32_negatives :: proc(t: ^testing.T) {
+	a := build_array([]i32{5, -3, 0, -100, 7, -3, 2147483647, -2147483648})
+	defer oa.array_free(&a)
+
+	idx, _ := oa.compute_sort_indices(&a)
+	defer oa.array_free(&idx)
+
+	sorted, _ := oa.compute_take(&a, &idx)
+	defer oa.array_free(&sorted)
+
+	expected := []i32{-2147483648, -100, -3, -3, 0, 5, 7, 2147483647}
+	testing.expect_value(t, sorted.length, len(expected))
+	for v, i in expected {
+		testing.expect_value(t, oa.array_get(&sorted, i, i32), v)
+	}
+	// Stable: the two -3s keep input order (index 1 before index 5).
+	testing.expect_value(t, oa.array_get(&idx, 2, i64), i64(1))
+	testing.expect_value(t, oa.array_get(&idx, 3, i64), i64(5))
+}
+
 @(test)
 test_sort_indices_nulls_last :: proc(t: ^testing.T) {
 	b := oa.builder_make(i32)

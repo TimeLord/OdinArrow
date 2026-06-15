@@ -65,6 +65,38 @@ test_buffer_pool_nulls :: proc(t: ^testing.T) {
 	testing.expect_value(t, oa.array_get(&a, 4, i32), i32(4))
 }
 
+// Regression: a pool used AS context.allocator must not route its own
+// bookkeeping (free-list stacks, base list) back through itself — that is
+// reentrant and corrupts the heap. Exercise many sizes and free/alloc cycles so
+// the free-list map and per-size stacks grow while the pool is the context
+// allocator; a use-after-free here would crash or trip the leak tracker.
+@(test)
+test_buffer_pool_as_context_allocator :: proc(t: ^testing.T) {
+	pool: oa.Buffer_Pool
+	oa.buffer_pool_init(&pool)
+	defer oa.buffer_pool_destroy(&pool)
+
+	context.allocator = oa.buffer_pool_allocator(&pool)
+
+	// Many distinct sizes create many free-list buckets; repeating the loop
+	// reuses freed blocks and grows the per-size stacks — all via the pool.
+	for round in 0..<3 {
+		arrs: [16]oa.Array
+		for s in 0..<16 {
+			n := (s + 1) * 50
+			b := oa.builder_make(i32, n)
+			for i in 0..<n { oa.builder_append(&b, i32(i + round)) }
+			arrs[s], _ = oa.builder_finish(&b)
+			oa.builder_destroy(&b)
+		}
+		for s in 0..<16 {
+			testing.expect_value(t, arrs[s].length, (s + 1) * 50)
+			testing.expect_value(t, oa.array_get(&arrs[s], 0, i32), i32(round))
+			oa.array_free(&arrs[s])
+		}
+	}
+}
+
 // String builders work through the pool too (data, offsets, and validity all
 // come from the pool).
 @(test)
