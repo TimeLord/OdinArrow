@@ -394,6 +394,27 @@ test_compute_cast_i32_to_f64 :: proc(t: ^testing.T) {
 	testing.expect(t, approx_eq(oa.array_get(&result, 2, f64), 3.0, 1e-10))
 }
 
+// Large cast: output exceeds the non-temporal-store threshold (8 MiB), so this
+// exercises the streaming-store path plus its scalar tail (length is not a
+// multiple of the SIMD width).
+@(test)
+test_compute_cast_large_nt :: proc(t: ^testing.T) {
+	n := 1_048_583 // > 1Mi f64 = 8 MiB out; %8 == 7 → 7-element tail
+	b := oa.builder_make(i32, n)
+	for i in 0..<n { oa.builder_append(&b, i32(i)) }
+	src, _ := oa.builder_finish(&b)
+	oa.builder_destroy(&b)
+	defer oa.array_free(&src)
+
+	result, _ := oa.compute_cast(&src, oa.Float64_Type{})
+	defer oa.array_free(&result)
+	testing.expect_value(t, result.length, n)
+	testing.expect(t, approx_eq(oa.array_get(&result, 0, f64),       0.0,         1e-6))
+	testing.expect(t, approx_eq(oa.array_get(&result, 123_456, f64), 123_456.0,   1e-6))
+	testing.expect(t, approx_eq(oa.array_get(&result, n - 1, f64),   f64(n - 1),  1e-6))   // tail
+	testing.expect(t, approx_eq(oa.array_get(&result, n - 4, f64),   f64(n - 4),  1e-6))   // tail
+}
+
 // ── arithmetic ────────────────────────────────────────────────────────────────
 
 @(test)
@@ -407,6 +428,27 @@ test_compute_add :: proc(t: ^testing.T) {
 	testing.expect_value(t, oa.array_get(&result, 0, i32), i32(11))
 	testing.expect_value(t, oa.array_get(&result, 1, i32), i32(22))
 	testing.expect_value(t, oa.array_get(&result, 2, i32), i32(33))
+}
+
+// Large add: output exceeds the non-temporal-store threshold, exercising the
+// streaming-store path and its scalar tail (length not a multiple of SIMD width).
+@(test)
+test_compute_add_large_nt :: proc(t: ^testing.T) {
+	n := 2_097_157 // > 2Mi i32 = 8 MiB out; %16 == 5 → 5-element tail
+	ab := oa.builder_make(i32, n)
+	bb := oa.builder_make(i32, n)
+	for i in 0..<n { oa.builder_append(&ab, i32(i)); oa.builder_append(&bb, i32(2 * i)) }
+	a, _ := oa.builder_finish(&ab); oa.builder_destroy(&ab)
+	b, _ := oa.builder_finish(&bb); oa.builder_destroy(&bb)
+	defer oa.array_free(&a); defer oa.array_free(&b)
+
+	result, _ := oa.compute_add(&a, &b)
+	defer oa.array_free(&result)
+	testing.expect_value(t, result.length, n)
+	testing.expect_value(t, oa.array_get(&result, 0, i32),         i32(0))
+	testing.expect_value(t, oa.array_get(&result, 500_000, i32),   i32(3 * 500_000))
+	testing.expect_value(t, oa.array_get(&result, n - 1, i32),     i32(3 * (n - 1)))   // tail
+	testing.expect_value(t, oa.array_get(&result, n - 3, i32),     i32(3 * (n - 3)))   // tail
 }
 
 @(test)

@@ -775,12 +775,33 @@ _cast_to :: proc(arr: ^Array, $To: typeid, allocator: mem.Allocator) -> (result:
 	return
 }
 
+// Outputs at/above this size are written with non-temporal (streaming) stores:
+// such a buffer won't stay cache-resident, so the usual read-for-ownership of its
+// cache lines is wasted bandwidth. Smaller outputs keep normal stores so a
+// consumer can read them while still hot. Only taken when inputs start at offset
+// 0 (so the SIMD loads are naturally aligned).
+_NT_STORE_MIN_BYTES :: 1 << 23 // 8 MiB
+
 _cast_impl :: proc(arr: ^Array, $From, $To: typeid, allocator: mem.Allocator) -> (result: Array, err: mem.Allocator_Error) {
 	n := arr.length
 	data_buf := buffer_make_uninit(n * size_of(To), allocator) or_return
 	dst := cast([^]To)data_buf.data
 	src := (cast([^]From)arr.buffers[1].data)[arr.offset:]
-	for i in 0..<n {
+	start := 0
+	if arr.offset == 0 && n * size_of(To) >= _NT_STORE_MIN_BYTES {
+		K  :: 8
+		VS :: #simd[K]From
+		VD :: #simd[K]To
+		svp := cast([^]VS)src
+		dvp := cast([^]VD)dst
+		nv  := n / K
+		for i in 0..<nv {
+			intrinsics.non_temporal_store(&dvp[i], cast(VD)svp[i])
+		}
+		intrinsics.atomic_thread_fence(.Seq_Cst)
+		start = nv * K
+	}
+	for i in start..<n {
 		dst[i] = To(src[i])
 	}
 	// Cast preserves null positions exactly — copy the validity bitmap wholesale.
@@ -858,7 +879,29 @@ _arith_impl :: proc(left, right: ^Array, $T: typeid, $OP: Arithmetic_Op, allocat
 	dst := cast([^]T)data_buf.data
 	l := (cast([^]T)left.buffers[1].data)[left.offset:]
 	r := (cast([^]T)right.buffers[1].data)[right.offset:]
-	for i in 0..<n {
+	start := 0
+	// Div is excluded: integer SIMD division isn't available, and it isn't a
+	// hot path. Add/Sub/Mul stream large outputs past the cache.
+	when OP != .Div {
+		if left.offset == 0 && right.offset == 0 && n * size_of(T) >= _NT_STORE_MIN_BYTES {
+			K  :: 64 / size_of(T) // one cache line per store
+			V  :: #simd[K]T
+			lv := cast([^]V)l
+			rv := cast([^]V)r
+			dv := cast([^]V)dst
+			nv := n / K
+			for i in 0..<nv {
+				v: V
+				when      OP == .Add { v = lv[i] + rv[i] }
+				else when OP == .Sub { v = lv[i] - rv[i] }
+				else when OP == .Mul { v = lv[i] * rv[i] }
+				intrinsics.non_temporal_store(&dv[i], v)
+			}
+			intrinsics.atomic_thread_fence(.Seq_Cst)
+			start = nv * K
+		}
+	}
+	for i in start..<n {
 		when      OP == .Add { dst[i] = l[i] + r[i] }
 		else when OP == .Sub { dst[i] = l[i] - r[i] }
 		else when OP == .Mul { dst[i] = l[i] * r[i] }
