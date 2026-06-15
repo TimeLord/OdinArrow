@@ -89,9 +89,21 @@ _max_i32_simd :: #force_inline proc "contextless" (data: [^]i32, n: int) -> i32 
 
 // Single-pass min and max.  Returns (min, max); n must be > 0.
 // Explicit #simd vectors (vs a scalar unroll) so the packed min/max lowers to
-// real SIMD even on the baseline target, where i32 packed min/max isn't emitted
-// from autovectorised scalar `min`/`max`. Two vector pairs hide op latency.
-_min_max_i32_simd :: #force_inline proc "contextless" (data: [^]i32, n: int) -> (lo: i32, hi: i32) {
+// real SIMD. Two vector pairs hide op latency.
+//
+// AVX2 is enabled for this proc only (the global build stays baseline x86-64, so
+// other kernels aren't affected): with AVX2 each #simd[8]i32 min/max is a single
+// vpminsd/vpmaxsd over a 256-bit ymm, removing the ~8% ALU tax the baseline
+// (SSE2, no packed i32 min/max → pcmpgtd+blend) pays — the kernel then runs at
+// the memory-read floor. NOT force-inlined so the target feature stays scoped to
+// this function rather than leaking AVX2 codegen into a baseline caller.
+//
+// TRADEOFF: emits AVX2 unconditionally, so it requires an AVX2 CPU (Haswell,
+// 2013+). To support older hardware later, gate this behind a runtime CPUID
+// check (e.g. core:sys/info or an `intrinsics` feature probe) and fall back to an
+// SSE4.1 (pminsd) or scalar variant — i.e. runtime dispatch like Arrow does.
+@(enable_target_feature = "avx2")
+_min_max_i32_simd :: proc "contextless" (data: [^]i32, n: int) -> (lo: i32, hi: i32) {
 	V  :: #simd[8]i32
 	vp := cast([^]V)data
 	nv := n / 8
