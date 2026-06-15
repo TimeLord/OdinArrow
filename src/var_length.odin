@@ -47,11 +47,12 @@ string_builder_make :: proc(initial_cap := 64, allocator := context.allocator) -
 	return b
 }
 
-string_builder_append :: proc(b: ^String_Builder, s: string) {
+string_builder_append :: #force_inline proc(b: ^String_Builder, s: string) {
 	n := len(s)
 	if b.data_len + n > b.data_cap { _sb_grow_data(b, b.data_len + n) }
 	if b.length + 1 >= b.off_cap   { _sb_grow_offsets(b) }
-	if n > 0 { mem.copy(rawptr(&b.data[b.data_len]), rawptr(raw_data(s)), n) }
+	// Builder buffer and the input string never alias → memcpy, not memmove.
+	if n > 0 { mem.copy_non_overlapping(rawptr(&b.data[b.data_len]), rawptr(raw_data(s)), n) }
 	b.data_len += n
 	b.offsets[b.length + 1] = i32(b.data_len)
 	if b.null_count > 0 {
@@ -62,7 +63,7 @@ string_builder_append :: proc(b: ^String_Builder, s: string) {
 	b.length += 1
 }
 
-string_builder_append_null :: proc(b: ^String_Builder) {
+string_builder_append_null :: #force_inline proc(b: ^String_Builder) {
 	if b.length + 1 >= b.off_cap { _sb_grow_offsets(b) }
 	byte_i := b.length >> 3
 	if byte_i >= b.bm_cap { _sb_grow_bitmap(b, byte_i + 1) }
