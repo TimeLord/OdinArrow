@@ -352,15 +352,19 @@ are C++ time ÷ Odin time — `>1` means OdinArrow is faster. Representative run
 
 | Benchmark            | C++/Odin |   | Benchmark             | C++/Odin |
 |----------------------|----------|---|-----------------------|----------|
-| Build 10M i32        | 1.77×    |   | Cast 10M i32→f64      | 1.03×    |
-| Sum 10M f64          | 1.35×    |   | Add 10M i32           | 0.93×    |
-| Min+Max 10M i32      | 0.99×    |   | Compare 10M f64       | 1.54×    |
-| Mean 10M f64         | 1.42×    |   | Scan 1M strings       | 8.19×    |
-| Filter 10M i32 (50%) | 4.02×    |   | Sum-where 10M f64     | 4.92×    |
-| Take 10M i32         | 1.00×    |   | Value counts 10M str  | 8.12×    |
-| Sort indices 1M i32  | 3.87×    |   | IPC roundtrip 10M i32 | 1.86×    |
+| Build 10M i32        | 1.84×    |   | Cast 10M i32→f64      | 1.75×    |
+| Build 1M strings     | 1.26×    |   | Add 10M i32           | 1.40×    |
+| Sum 10M f64          | 1.49×    |   | Compare 10M f64       | 1.56×    |
+| Sum 10M f64 (nulls)  | 1.29×    |   | Scan 1M strings       | 8.14×    |
+| Min+Max 10M i32      | 1.00×    |   | Sum-where 10M f64     | 5.72×    |
+| Mean 10M f64         | 1.30×    |   | Value counts 10M str  | 7.50×    |
+| Filter 10M i32 (50%) | 4.76×    |   | IPC roundtrip 10M i32 | 1.90×    |
+| Filter 10M i32 (1%)  | 2.30×    |   | Take 10M i32          | 1.04×    |
+| Sort indices 1M i32  | 3.84×    |   |                       |          |
 
-Every kernel is now at parity or faster. The big wins come from fused kernels
-(filter, sum-where), dictionary group-by (value counts), an LSD radix sort, and
-SIMD compares; the element-wise kernels (cast/add/take) reach parity once output
-buffers are recycled through a pool, mirroring how Arrow reuses its MemoryPool.
+All 17 kernels are now at parity or faster. The big wins come from fused kernels
+(filter, sum-where), dictionary group-by (value counts), and an LSD radix sort;
+SIMD compares and a per-proc-AVX2 min/max remove ALU overhead; and the
+element-wise kernels (cast/add/take) reach or beat parity via a recycling buffer
+pool (mirroring Arrow's MemoryPool) plus non-temporal stores that skip the
+output buffer's read-for-ownership traffic.
