@@ -2,3 +2,4 @@ lib/
 bin/
 tmp_roundtrip/
 Learn/
+.claude/
