@@ -62,7 +62,7 @@ _max_run :: #force_inline proc(data: [^]$T, n: int) -> T {
 }
 
 _min_max_run :: #force_inline proc(data: [^]$T, n: int) -> (lo: T, hi: T) {
-	when T == i32 { return _min_max_i32_simd(data, n) }
+	when ODIN_ARCH == .amd64 && T == i32 { return _min_max_i32_simd(data, n) }
 	else {
 		lo = data[0]; hi = data[0]
 		for i in 1..<n {
@@ -345,7 +345,7 @@ _min_max_typed :: #force_inline proc(arr: ^Array, $T: typeid) -> (min_val: f64, 
 	if n == 0 { return }
 	lo, hi: T
 	if arr.buffers[0].data == nil {
-		when T == i32 {
+		when ODIN_ARCH == .amd64 && T == i32 {
 			if off == 0 {
 				lo, hi = _min_max_i32_simd(data, n)
 			} else {
